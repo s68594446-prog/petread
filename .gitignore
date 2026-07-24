@@ -1,0 +1,29 @@
+# --- 密钥与本地配置 ---
+.env
+.env.local
+*.key
+# config.yaml 目前只存环境变量名(api_key_env),不含密钥,因此是提交的。
+# 如果你哪天把真实 key 写进去了,立刻把下面这行取消注释,并轮换那个 key。
+# config.yaml
+
+# --- 数据与产物 ---
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite3
+
+# --- 环境 ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.python-version
+
+# --- 工具本地配置 ---
+.claude/
+
+# --- 系统 ---
+.DS_Store
+Thumbs.db

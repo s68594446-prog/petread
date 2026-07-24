@@ -1,0 +1,170 @@
+# petread
+
+宠物行为判读。上传一段视频,按行为学编码表拆解可观察信号,给出带依据的状态候选。
+
+信号不足时会明确说"看不出来",不会编一个结论。
+
+## 它做什么
+
+1. **视频预处理** — 逐帧算运动曲线,按运动峰值智能抽帧(不是均匀抽),提取 16kHz 音轨
+2. **知识库注入** — 按物种加载行为学编码表(犬/猫),含每个信号的置信度分级
+3. **模型判读** — 全模态模型一次完成:视觉信号编码 + 声学事件匹配 + 时序对齐 + 规则裁决
+4. **约束与护栏** — 低置信度候选自动丢弃;建议不得包含"惩罚警告信号"这类会加剧问题的内容
+
+## 快速开始
+
+需要 Python 3.11+ 和 ffmpeg。
+
+**1. 克隆并装依赖**
+
+```bash
+git clone git@github.com:<你的账号>/petread.git
+cd petread
+```
+
+```bash
+brew install ffmpeg                        # macOS;Linux 用 apt install ffmpeg
+python3.13 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+> opencv-python 目前没有 Python 3.14 的 arm64 wheel,建议用 3.11–3.13 建 venv。
+
+**2. 配置密钥**
+
+密钥只从环境变量读,`config.yaml` 里只写变量名。复制 [.env.example](.env.example) 为 `.env` 并填入你的 key:
+
+```bash
+cp .env.example .env
+# 编辑 .env,把 MIMO_API_KEY 换成真实的 key
+```
+
+`.env` 已在 `.gitignore` 中,不会被提交。启动时 app.py 会自动加载它(通过 python-dotenv),之后不用每次在命令行传 key。
+
+> 也可以不建 `.env`,直接 `export MIMO_API_KEY='...'`;已存在的环境变量优先,不会被 `.env` 覆盖。
+
+**3. 启动**
+
+```bash
+.venv/bin/python app.py
+```
+
+默认监听 `0.0.0.0:8000`,本机浏览器打开 <http://localhost:8000>。
+
+改端口用 `PETREAD_PORT=9000 .venv/bin/python app.py`,开发时热重载加 `PETREAD_RELOAD=1`。
+
+## 手机在局域网访问
+
+服务监听 `0.0.0.0`,所以同一 Wi-Fi 下的手机可以直接访问你电脑的内网地址。
+
+**1. 查电脑的内网 IP**
+
+```bash
+ipconfig getifaddr en0            # macOS,Wi-Fi 通常是 en0;有线试 en1
+```
+
+```bash
+hostname -I | awk '{print $1}'    # Linux
+```
+
+拿到形如 `192.168.1.23` 的地址。
+
+**2. 手机浏览器打开** `http://192.168.1.23:8000`(换成你的实际 IP)。
+
+录视频入口需要 HTTPS 或 localhost 才能调起摄像头;局域网 HTTP 下 `<input capture>` 仍可从相册选择已录制的视频。手机和电脑必须连同一个网段;连不上先检查电脑防火墙是否放行 8000 端口。
+
+## 用法
+
+浏览器打开后:选物种 → 选场景标签(可多选)+ 补充描述 → 录视频或拍照 → 开始判读。
+
+处理需要 20–30 秒,页面有进度条和已用秒数,不会干等。
+
+结果分三层,默认只展开第一层:
+
+| 层 | 内容 |
+|---|---|
+| 一 | 翻译一句话 + 置信度 + 可以做什么 |
+| 二 | 时间轴(视觉信号与声学事件对齐)、冲突裁决、判断依据 |
+| 三 | 模型返回的原始 JSON |
+
+底部有"实际情况是什么"反馈框,填的内容会存进 `feedback` 表,用于后续校准。
+
+## 三种模式
+
+| 模式 | 触发 | 说明 |
+|---|---|---|
+| `native` | 默认 | 视频直传模型,音轨随视频一起处理。最快最省 |
+| `frames` | 勾选"用抽帧链路" | 智能抽帧 + 分三次调用,用于对比采样策略 |
+| `quick` | 选择拍照入口 | 单张图片。没有时间维度,准确度明显更低 |
+
+实测同一段素材:native 约 12.6k tokens / 24s,frames 约 32.2k tokens / 72s。
+
+## 上传限制
+
+视频 20MB,图片 10MB。前端会先拦一次并提示裁剪,后端边写边计字节数再校验一次——不能只靠前端,直接打接口就绕过去了。
+
+## 命令行
+
+不开服务也能跑:
+
+```bash
+.venv/bin/python -m pipeline.providers --video pet.mp4 --mode native --species dog --context "客厅,快递员按门铃"
+```
+
+会打印完整原始输出、token 用量、耗时和实际发送的 payload 结构(base64 已脱敏)。
+
+首次接入新端点时先探测 base64 支持:
+
+```bash
+.venv/bin/python -m pipeline.providers --probe --video pet.mp4
+```
+
+视频预处理单独自测(抽帧结果会存到 `data/frames/` 方便肉眼检查):
+
+```bash
+.venv/bin/python -m pipeline.video pet.mp4
+```
+
+## 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/` | 前端页面 |
+| POST | `/analyze` | multipart 上传,返回 SSE 流(进度 + 最终结果) |
+| GET | `/history?limit=30` | 历史记录 |
+| GET | `/record/{id}` | 单条详情(含反馈) |
+| POST | `/feedback/{record_id}` | 用户自评 |
+| GET/POST | `/profiles` | 宠物档案 |
+| GET | `/healthz` | 健康检查,含 key 是否就位 |
+
+`/analyze` 直接返回 `text/event-stream`,前端用 fetch + ReadableStream 读。EventSource 只能发 GET、带不了 multipart,所以没用它——代价是没有自动重连,一次判读 20–30 秒,断了重传即可。
+
+## 项目结构
+
+```
+config.yaml            provider 配置,只存环境变量名
+app.py                 FastAPI 服务端
+index.html             单文件前端,内联 CSS/JS,无框架
+knowledge/
+  dog.yaml             犬类行为学编码表
+  cat.yaml             猫科行为学编码表
+pipeline/
+  video.py             运动曲线、智能抽帧、运动学特征、音轨提取
+  prompts.py           prompt 模板与知识库注入
+  providers.py         模型调用层,provider 可切换
+  analyze.py           判读编排,供服务端调用
+  store.py             SQLite 持久层
+data/                  上传素材、抽帧、数据库(已 gitignore)
+```
+
+## 换模型
+
+`config.yaml` 的 `providers.omni` 段。`type` 支持 `openai`(OpenAI 兼容端点,MiMo 走这个)、`deepseek`、`gemini`、`mock`。模型名不在代码里硬编码。
+
+把 `mock` 改成 `true` 可以在不发真实请求的情况下跑通整条链路,假数据由知识库现场生成。
+
+## 已知限制
+
+- 判读质量依赖知识库,而知识库是行为学通识的编码,不是诊断工具。涉及疼痛、疾病或持续性行为问题,请找执业兽医或行为专业人员。
+- 单张照片模式缺少时间维度和声音,信号不足的概率明显更高,这是方法本身的限制,不是 bug。
+- 运动强度的档位阈值(`video.py` 的 `_classify_intensity`)是按 320×180 灰度帧差定的,不同拍摄条件下基线会整体偏移,积累一批真实素材后建议重新标定。
