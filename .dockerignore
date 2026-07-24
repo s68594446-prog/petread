@@ -1,0 +1,21 @@
+# 构建上下文排除,避免把本地环境与数据打进镜像
+.venv/
+venv/
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite3
+.env
+.env.local
+.git/
+.gitignore
+.gitattributes
+__pycache__/
+*.py[cod]
+.python-version
+.claude/
+.DS_Store
+Thumbs.db
+*.md.bak

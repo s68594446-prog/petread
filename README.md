@@ -1,3 +1,13 @@
+---
+title: PetRead
+emoji: 🐾
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # petread
 
 宠物行为判读。上传一段视频,按行为学编码表拆解可观察信号,给出带依据的状态候选。
@@ -49,9 +59,9 @@ cp .env.example .env
 .venv/bin/python app.py
 ```
 
-默认监听 `0.0.0.0:8000`,本机浏览器打开 <http://localhost:8000>。
+默认监听 `0.0.0.0:7860`,本机浏览器打开 <http://localhost:7860>。
 
-改端口用 `PETREAD_PORT=9000 .venv/bin/python app.py`,开发时热重载加 `PETREAD_RELOAD=1`。
+端口优先级:`PORT` > `PETREAD_PORT` > 默认 7860。改端口用 `PORT=9000 .venv/bin/python app.py`,开发时热重载加 `PETREAD_RELOAD=1`。
 
 ## 手机在局域网访问
 
@@ -69,9 +79,9 @@ hostname -I | awk '{print $1}'    # Linux
 
 拿到形如 `192.168.1.23` 的地址。
 
-**2. 手机浏览器打开** `http://192.168.1.23:8000`(换成你的实际 IP)。
+**2. 手机浏览器打开** `http://192.168.1.23:7860`(换成你的实际 IP)。
 
-录视频入口需要 HTTPS 或 localhost 才能调起摄像头;局域网 HTTP 下 `<input capture>` 仍可从相册选择已录制的视频。手机和电脑必须连同一个网段;连不上先检查电脑防火墙是否放行 8000 端口。
+录视频入口需要 HTTPS 或 localhost 才能调起摄像头;局域网 HTTP 下 `<input capture>` 仍可从相册选择已录制的视频。手机和电脑必须连同一个网段;连不上先检查电脑防火墙是否放行 7860 端口。
 
 ## 用法
 
@@ -101,7 +111,23 @@ hostname -I | awk '{print $1}'    # Linux
 
 ## 上传限制
 
-视频 20MB,图片 10MB。前端会先拦一次并提示裁剪,后端边写边计字节数再校验一次——不能只靠前端,直接打接口就绕过去了。
+应用自身的上限:视频 20MB,图片 10MB。前端会先拦一次并提示裁剪,后端边写边计字节数再校验一次——不能只靠前端,直接打接口就绕过去了。
+
+**部署到 Hugging Face Spaces 时还有平台一层限制。** HF 没有公开请求体大小的确切数字,社区有过大文件 POST 收到 `413 request entity too large` 的报告。20MB 通常没问题,但在线版建议把视频控制得更短(5–10 秒、10MB 以内)最稳。真遇到 413,就是撞到平台的反向代理上限了,只能进一步压缩素材。
+
+## 部署到 Hugging Face Spaces(Docker)
+
+本项目带 `Dockerfile`,可直接作为 HF **Docker SDK** Space 运行。README 顶部的 YAML 元数据块(`sdk: docker`、`app_port: 7860`)是 HF 识别配置用的,别删。
+
+**要点:**
+
+- 端口固定 `7860`(HF 路由到 `app_port`),`app.py` 读 `PORT` 默认也是 7860,host 固定 `0.0.0.0`。
+- `MIMO_API_KEY` 在 Space 的 **Settings → Repository secrets** 里配,代码照旧从 `os.environ` 读,不用改。
+- 数据目录由 `DATA_DIR` 控制,Docker 里默认 `/app/data`。
+
+**⚠️ 免费层数据不持久:** HF 免费 Space 的容器文件系统是临时的,**重启 / 重新构建后 SQLite 历史记录和上传的文件都会丢失**。这是免费层的固有限制,不是 bug。要保留数据得在 Space 里开启付费的持久化存储(挂载到 `/data`),然后把 Space 变量 `DATA_DIR` 设成 `/data`。
+
+网页端具体怎么建 Space、设 private、同步 GitHub 代码,见本次交付时单独给出的步骤说明。
 
 ## 命令行
 

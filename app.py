@@ -49,7 +49,8 @@ from pipeline import store
 from pipeline.prompts import load_knowledge
 
 INDEX_HTML = os.path.join(PROJECT_ROOT, "index.html")
-UPLOAD_DIR = os.path.join(PROJECT_ROOT, "data", "uploads")
+# 上传目录跟随 store.DATA_DIR,由 DATA_DIR 环境变量统一控制。
+UPLOAD_DIR = os.path.join(store.DATA_DIR, "uploads")
 
 MAX_VIDEO_BYTES = 20 * 1024 * 1024      # 20MB,与前端提示保持一致
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -360,9 +361,12 @@ async def create_profile(payload: dict) -> JSONResponse:
 if __name__ == "__main__":
     import uvicorn
 
+    # 端口优先级:PORT(HF Spaces / 通用) > PETREAD_PORT(本地习惯) > 7860。
+    # HF Docker Spaces 固定路由到 7860,host 必须 0.0.0.0。
+    port = int(os.environ.get("PORT") or os.environ.get("PETREAD_PORT") or "7860")
     uvicorn.run(
         "app:app",
         host=os.environ.get("PETREAD_HOST", "0.0.0.0"),
-        port=int(os.environ.get("PETREAD_PORT", "8000")),
+        port=port,
         reload=bool(os.environ.get("PETREAD_RELOAD")),
     )

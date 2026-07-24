@@ -16,7 +16,11 @@ from datetime import datetime
 from typing import Any
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_DB_PATH = os.path.join(PROJECT_ROOT, "data", "petread.db")
+
+# 数据根目录:SQLite 与上传文件都放这里。由 DATA_DIR 控制,默认项目内的 ./data。
+# HF Spaces 上可设成 /data(需开启持久化存储,否则重启即丢)。
+DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(PROJECT_ROOT, "data")
+DEFAULT_DB_PATH = os.path.join(DATA_DIR, "petread.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS records (

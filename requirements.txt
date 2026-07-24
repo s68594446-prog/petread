@@ -1,4 +1,4 @@
-opencv-python>=4.9
+opencv-python-headless>=4.9
 ffmpeg-python>=0.2.0
 numpy>=1.26
 pillow>=10.0
