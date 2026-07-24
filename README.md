@@ -1,13 +1,3 @@
----
-title: PetRead
-emoji: 🐾
-colorFrom: blue
-colorTo: green
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # petread
 
 宠物行为判读。上传一段视频,按行为学编码表拆解可观察信号,给出带依据的状态候选。
@@ -113,21 +103,21 @@ hostname -I | awk '{print $1}'    # Linux
 
 应用自身的上限:视频 20MB,图片 10MB。前端会先拦一次并提示裁剪,后端边写边计字节数再校验一次——不能只靠前端,直接打接口就绕过去了。
 
-**部署到 Hugging Face Spaces 时还有平台一层限制。** HF 没有公开请求体大小的确切数字,社区有过大文件 POST 收到 `413 request entity too large` 的报告。20MB 通常没问题,但在线版建议把视频控制得更短(5–10 秒、10MB 以内)最稳。真遇到 413,就是撞到平台的反向代理上限了,只能进一步压缩素材。
+**部署到线上平台时,平台的反向代理可能还有一层请求体上限。** 大文件 POST 有可能收到 `413 request entity too large`。应用自身 20MB 通常没问题,但在线版建议把视频控制得更短(5–10 秒、10MB 以内)最稳。真遇到 413,就是撞到平台上限了,只能进一步压缩素材。
 
-## 部署到 Hugging Face Spaces(Docker)
+## 部署到 Railway(Docker)
 
-本项目带 `Dockerfile`,可直接作为 HF **Docker SDK** Space 运行。README 顶部的 YAML 元数据块(`sdk: docker`、`app_port: 7860`)是 HF 识别配置用的,别删。
+本项目带 `Dockerfile`,Railway 可直接用它构建。仓库里的 `railway.json` 已声明用 Dockerfile 构建(否则 Railway 默认走 nixpacks,识别不了 ffmpeg / opencv 的系统依赖)。
 
 **要点:**
 
-- 端口固定 `7860`(HF 路由到 `app_port`),`app.py` 读 `PORT` 默认也是 7860,host 固定 `0.0.0.0`。
-- `MIMO_API_KEY` 在 Space 的 **Settings → Repository secrets** 里配,代码照旧从 `os.environ` 读,不用改。
+- **端口不写死。** Railway 通过 `PORT` 环境变量注入端口,`app.py` 读 `os.environ["PORT"]`(缺省 7860),host 固定 `0.0.0.0`。Dockerfile 的 `EXPOSE` 只是文档提示,不绑定实际端口。
+- `MIMO_API_KEY` 在 Railway 项目的 **Variables** 里配,代码照旧从 `os.environ` 读,不用改。
 - 数据目录由 `DATA_DIR` 控制,Docker 里默认 `/app/data`。
 
-**⚠️ 免费层数据不持久:** HF 免费 Space 的容器文件系统是临时的,**重启 / 重新构建后 SQLite 历史记录和上传的文件都会丢失**。这是免费层的固有限制,不是 bug。要保留数据得在 Space 里开启付费的持久化存储(挂载到 `/data`),然后把 Space 变量 `DATA_DIR` 设成 `/data`。
+**⚠️ 数据不持久:** Railway 服务的容器文件系统是临时的,**重新部署 / 重启后 SQLite 历史记录和上传的文件都会丢失**。这不是 bug。要保留数据,在 Railway 里加一个 **Volume** 挂到某个路径(如 `/data`),再把服务变量 `DATA_DIR` 设成那个路径。
 
-网页端具体怎么建 Space、设 private、同步 GitHub 代码,见本次交付时单独给出的步骤说明。
+网页端具体怎么连 GitHub、配变量、拿访问地址,见本次交付时单独给出的步骤说明。
 
 ## 命令行
 

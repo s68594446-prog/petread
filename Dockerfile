@@ -1,4 +1,4 @@
-# petread —— Hugging Face Spaces (Docker SDK)
+# petread —— 容器镜像(Railway / 任意支持 Dockerfile 的平台)
 FROM python:3.11-slim
 
 # 系统依赖:
@@ -20,10 +20,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 再复制项目文件(.dockerignore 已排除 .venv / data / .git 等)
 COPY . .
 
-# HF Spaces 固定路由到 7860;app.py 读 PORT,默认也是 7860。host 由代码固定 0.0.0.0。
-ENV PORT=7860
-# 数据目录默认 /app/data(容器内可写)。HF 上如开了持久化存储可在 Space 设 DATA_DIR=/data。
+# 端口不写死:运行平台通过 PORT 环境变量注入(Railway 会自动注入),
+# app.py 读 os.environ["PORT"],缺省 7860,host 由代码固定 0.0.0.0。
+# EXPOSE 仅作文档提示,不绑定实际端口;用 ARG 给个默认值,不固定 7860。
+ARG PORT=7860
+EXPOSE ${PORT}
+
+# 数据目录默认 /app/data(容器内可写)。Railway 同为临时文件系统,重启即丢。
 ENV DATA_DIR=/app/data
-EXPOSE 7860
 
 CMD ["python", "app.py"]
