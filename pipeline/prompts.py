@@ -582,7 +582,8 @@ def mimo_system_preamble(now: datetime | None = None) -> str:
 # 判定证据是否充分时,这些通道必须从分母里剔除,否则单图/纯音频会被必然判为证据不足。
 _STRUCTURALLY_ABSENT = {
     "image": {
-        "channels": ["displacement_signals", "affiliative_signals"],
+        "channels": ["displacement_signals", "affiliative_signals",
+                     "tail.motion", "ear.motion"],
         "note": "位移信号与亲和信号都是动作序列,单帧无法判定;尾部/耳部的 motion 子维度同理。",
     },
     "audio": {
@@ -592,6 +593,21 @@ _STRUCTURALLY_ABSENT = {
     "video": {"channels": [], "note": ""},
 }
 
+# ---- 单图模式的通道分类 ----------------------------------------------------
+# 主轴通道:这两个中至少一个可读,单帧就具备判读基础。
+_IMAGE_AXIS_CHANNELS = ["body_posture", "ear_position"]
+
+# 永不进分母:单帧里天然读不到,或极易因遮挡/照度/毛量而读不到。
+# 读不到不算"证据不足",读到了则计入可观测数(加分项,不是及格项)。
+_IMAGE_NEVER_COUNTED = [
+    "displacement_signals",   # 位移信号:动作序列,单帧不成立
+    "affiliative_signals",    # 亲和信号:同上
+    "tail 的 motion 子维度",  # 摆动是时间量
+    "pupil",                  # 瞳孔:照度未知时不可用(知识库已标 confidence=低)
+    "whisker_position",       # 胡须:长毛/角度/分辨率极易不可辨
+    "eye 的 pupil 子维度",    # 犬类 eye.pupil 同理
+]
+
 
 def _sufficiency_rules(modality: str, knowledge: dict) -> str:
     """按模态生成"证据是否充分"的判定规则。
@@ -600,20 +616,33 @@ def _sufficiency_rules(modality: str, knowledge: dict) -> str:
     沿用同一套门槛会导致"只要不是视频就必然证据不足",那是规则的缺陷而非事实。
     """
     if modality == "image":
-        return """insufficient_evidence 必须为 true(且 candidates 置空、insufficient_reason 必填)当:
-- 画面中没有目标物种,或个体被严重遮挡 / 过曝 / 模糊到读不出体态;
-- 静态可观测通道少于 3 个;
-- 知识库 meta.reading_order 中作为判读主轴的通道(体态)不可观测;
-- 所有候选的 confidence 都低于 0.5。
+        never = "\n".join(f"    · {c}" for c in _IMAGE_NEVER_COUNTED)
+        return f"""【单图的充分性判据 —— 按下面这一套执行,不要套用视频的门槛】
 
-【单图判定的重要校准】
-- 位移信号、亲和信号,以及尾部/耳部的 motion 子维度,在单帧中属于**结构性不可观测**,
-  写 "不可观测" 即可,**不要**把它们计入"通道不足"的分母,也不要因此判证据不足。
-- 只要个体清晰可见、体态与至少两个其他静态通道(耳位、尾位、瞳孔、胡须、口部、眼)可读,
-  就应当正常给出候选,不要因为"只有一张照片"这个理由本身判证据不足。
-- 但静态素材缺少时间维度,无法区分"瞬间姿态"与"持续状态",也无法看到变化方向。
-  因此单图的 confidence **上限建议 0.75**,并在每条 evidence 中如实反映这一局限。
-- 结论只描述该瞬间的状态,不要推断此前或此后会发生什么。"""
+**允许出候选的条件(满足即出,不要再加码):**
+  (a) {_IMAGE_AXIS_CHANNELS} 这两个主轴通道中**至少一个**可读;**且**
+  (b) 可观测通道总数 **≥ 2**。
+满足即正常输出 candidates(低置信度),**不得**判 insufficient_evidence。
+
+例:只有"耳位 + 体态"两个可读,其余全不可观测 —— 这是**充分**的,照常出候选。
+耳位与体态是行为学判读的主轴信号,它们可读时单张照片已经足以支撑一个低置信度判断。
+
+**永不计入分母的通道**(读不到是素材类型使然,不是证据不足):
+{never}
+  这些通道写 "不可观测" 即可。**读不到不扣分;读到了则计入 (b) 的可观测总数(加分项)。**
+
+**insufficient_evidence 只在下列情况为 true:**
+- 画面中没有目标物种;
+- 个体严重模糊 / 过曝 / 欠曝到读不出形态;
+- 主体被完全遮挡,主轴通道(体态、耳位)一个都读不出;
+- 可观测通道总数 < 2;
+- 所有候选的 confidence 都低于 0.5。
+除此之外**不得**以"只有一张照片""缺少时间维度""通道数偏少"为由判证据不足。
+
+**置信度校准:** 静态素材无法区分"瞬间姿态"与"持续状态",也看不到变化方向。
+单图 confidence **上限 0.75**;仅靠两个主轴通道出的候选建议落在 **0.5–0.65**。
+在 evidence 中如实写明该局限,但这是**降低置信度**的理由,不是**拒绝判读**的理由。
+结论只描述该瞬间的状态,不要推断此前或此后会发生什么。"""
 
     if modality == "audio":
         return """insufficient_evidence 必须为 true(且 candidates 置空、insufficient_reason 必填)当:
@@ -697,7 +726,10 @@ timeline 中的 visual 字段一律写 null。这不是信息缺失,是素材类
 - 因品种形态学而结构性不可用的通道(见各通道 caveats)同样写 "不可观测"。
 - 每个取值同时给出它在知识库里的 value_confidence 等级。
 - 每条记录必须带时间戳 t。
-{f"- 本次素材中以下通道属于结构性不可观测,写 “不可观测” 即可,不必勉强判读:{absent['channels']}。{absent['note']}" if absent["channels"] else ""}"""
+{f"- 本次素材中以下通道属于结构性不可观测,写 “不可观测” 即可,不必勉强判读:{absent['channels']}。{absent['note']}" if absent["channels"] else ""}
+{'''- **重点读主轴:** 优先把 body_posture(整体重心与肌肉张力)和 ear_position 读准,
+  这两个是判读主轴,单帧里通常都能读到。其余通道读不到就写 "不可观测",不必勉强,
+  也不要因为它们读不到就认为整体证据不足 —— 充分性判据见第五步。''' if modality == "image" else ""}"""
 
     if modality == "image":
         step2 = """════════ 第二步:声学事件编码(填入 audio_events) ════════
