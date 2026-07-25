@@ -16,7 +16,7 @@ from . import providers as providers_mod
 
 Progress = Callable[[str, int, str], None]
 
-MODES = ("native", "frames", "quick")
+MODES = ("native", "frames", "quick", "audio")
 
 # 各模式的进度锚点,用于前端画进度条。模型调用那一段是大头,单独留出区间。
 _STAGE_PLAN = {
@@ -24,6 +24,7 @@ _STAGE_PLAN = {
     "frames": [("prepare", 8), ("motion", 18), ("frames", 30),
                ("audio", 38), ("model", 90), ("persist", 100)],
     "quick": [("prepare", 15), ("model", 90), ("persist", 100)],
+    "audio": [("prepare", 15), ("model", 90), ("persist", 100)],
 }
 
 
@@ -57,6 +58,8 @@ def analyze(
 
     if mode == "quick":
         out = _run_quick(media_path, species, context, provider, knowledge, report)
+    elif mode == "audio":
+        out = _run_audio(media_path, species, context, provider, knowledge, report)
     elif mode == "native":
         out = _run_native(media_path, species, context, provider, knowledge, report)
     else:
@@ -116,13 +119,38 @@ def _run_quick(media_path, species, context, provider, knowledge, report) -> dic
     hint = ("单张静态照片,没有时间维度也没有音轨。"
             "visual_signals 只输出一条记录,t 写 0;audio_events 输出空数组;"
             "timeline 只输出一段,direction 写「无变化」。"
-            "缺少时间维度本身就削弱了判读依据,请在 insufficient_evidence 的判定中考虑这一点。")
+            "静态体态本身是可判读的,按单图的判定门槛处理。")
     prompt = prompts_mod.omni_prompt(species, context, knowledge, motion,
-                                     media_hint=hint)
+                                     media_hint=hint, modality="image")
 
     report("model", 30, "模型判读中…")
     result = provider.call_omni(media_path, "image", prompt)
     report("model", 90, "模型返回,整理结果…")
+    return _finish(provider, result, motion)
+
+
+def _run_audio(media_path, species, context, provider, knowledge, report) -> dict:
+    """纯音频:只做声学分析,visual_signals 留空。"""
+    motion = {
+        "duration": None,
+        "motion_peaks": [],
+        "motion_intensity": "不可观测",
+        "motion_pattern": "不可观测",
+        "periodicity_hz": None,
+        "_note": "纯音频没有画面,运动学指标全部不可用。",
+    }
+    hint = ("一段纯音频,没有任何画面。只做声学事件的切分、描述与模式匹配,"
+            "visual_signals 输出空数组,timeline 的 visual 字段一律写 null。")
+    prompt = prompts_mod.omni_prompt(species, context, knowledge, motion,
+                                     media_hint=hint, modality="audio")
+
+    report("model", 30, "声学分析中…")
+    result = provider.call_omni(media_path, "audio", prompt)
+    report("model", 90, "模型返回,整理结果…")
+
+    # 兜底:纯音频下视觉一定为空,不允许模型凭空补出视觉观察
+    if isinstance(result, dict) and "error" not in result:
+        result["visual_signals"] = []
     return _finish(provider, result, motion)
 
 

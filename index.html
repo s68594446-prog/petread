@@ -55,6 +55,11 @@
   }
   .filebtn.sec{padding:12px;font-size:14px;font-weight:400;color:var(--muted)}
   .filebtn input{display:none}
+  .minibtn{
+    padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--chip);
+    font-size:13px;cursor:pointer;-webkit-tap-highlight-color:transparent;
+  }
+  .minibtn input{display:none}
   .filename{font-size:13px;color:var(--muted);margin-top:8px;word-break:break-all}
   button.go{
     width:100%;padding:15px;border:0;border-radius:12px;background:var(--accent);
@@ -133,15 +138,28 @@
 
   <h2 style="margin-top:20px">3 · 素材</h2>
   <label class="filebtn" id="vlabel">
-    🎥 录一段视频
-    <input type="file" id="video" accept="video/*" capture="environment">
+    🎥 选一段视频
+    <input type="file" id="video" accept="video/*">
     <div class="filename muted" id="vname">建议 5-15 秒、10MB 以内(上限 20MB;在线版过大可能被平台拒绝)</div>
   </label>
   <label class="filebtn sec" id="ilabel" style="margin-top:10px">
-    📷 只拍一张照片(快速模式,准确度较低)
-    <input type="file" id="photo" accept="image/*" capture="environment">
+    📷 选一张照片(快速模式,准确度较低)
+    <input type="file" id="photo" accept="image/*">
     <div class="filename" id="iname"></div>
   </label>
+  <label class="filebtn sec" id="alabel" style="margin-top:10px">
+    🔊 只有声音(叫声 / 呼噜,只做声学分析)
+    <input type="file" id="audio" accept="audio/*">
+    <div class="filename" id="aname"></div>
+  </label>
+
+  <div class="row" style="margin-top:12px">
+    <span class="muted" style="font-size:13px">或直接拍摄:</span>
+    <label class="minibtn">📹 录像
+      <input type="file" id="videoCap" accept="video/*" capture="environment"></label>
+    <label class="minibtn">📸 拍照
+      <input type="file" id="photoCap" accept="image/*" capture="environment"></label>
+  </div>
 
   <div class="row" style="margin-top:14px">
     <input type="checkbox" id="framesmode" style="width:auto">
@@ -180,7 +198,7 @@
 <script>
 "use strict";
 
-const MAX_VIDEO_MB = 20, MAX_IMAGE_MB = 10;
+const MAX_VIDEO_MB = 20, MAX_IMAGE_MB = 10, MAX_AUDIO_MB = 15;
 const SCENES = ["吃饭前","见生人","独处","主人回家","看到其他动物","玩耍中"];
 const $ = s => document.querySelector(s);
 
@@ -205,35 +223,78 @@ $("#species").onclick = e => {
   species = b.dataset.v;
 };
 
-/* ---------- 文件选择 ---------- */
-function pickFile(input, kind, limitMB, nameEl, otherInput, otherNameEl) {
+/* ---------- 文件选择 ----------
+   五个 input(视频/图片/音频 各一个从文件选,外加两个 capture 直拍),
+   任选其一,选中后清空其余。 */
+const KIND_LABEL = { video: "视频", image: "图片", audio: "音频" };
+const KIND_LIMIT = { video: MAX_VIDEO_MB, image: MAX_IMAGE_MB, audio: MAX_AUDIO_MB };
+const HINT_DEFAULT = {
+  vname: "建议 5-15 秒、10MB 以内(上限 20MB;在线版过大可能被平台拒绝)",
+  iname: "", aname: "",
+};
+
+// input id -> [种类, 显示文件名的元素 id]
+const INPUTS = {
+  video:    ["video", "vname"],
+  photo:    ["image", "iname"],
+  audio:    ["audio", "aname"],
+  videoCap: ["video", "vname"],
+  photoCap: ["image", "iname"],
+};
+
+function resetPickers(exceptId) {
+  for (const id of Object.keys(INPUTS)) {
+    if (id === exceptId) continue;
+    const el = $("#" + id);
+    if (el) el.value = "";
+  }
+  // 文件名提示回到初始态(被选中的那个稍后单独覆盖)
+  for (const [nameId, text] of Object.entries(HINT_DEFAULT)) {
+    const el = $("#" + nameId);
+    if (!el) continue;
+    const owner = INPUTS[exceptId];
+    if (owner && owner[1] === nameId) continue;
+    el.textContent = text;
+    el.classList.add("muted");
+  }
+}
+
+for (const [id, [kind, nameId]] of Object.entries(INPUTS)) {
+  const input = $("#" + id);
+  if (!input) continue;
   input.onchange = () => {
     const f = input.files[0];
     if (!f) return;
-    const mb = f.size / 1024 / 1024;
+    const mb = f.size / 1024 / 1024, limitMB = KIND_LIMIT[kind];
+    const nameEl = $("#" + nameId);
     if (mb > limitMB) {
-      showErr(`这个${kind === "video" ? "视频" : "图片"} ${mb.toFixed(1)}MB,` +
-              `超过 ${limitMB}MB 上限。请先裁剪(建议只保留最关键的 5-15 秒)后再上传。`);
-      input.value = ""; nameEl.textContent = ""; setFile(null, null);
+      showErr(`这个${KIND_LABEL[kind]} ${mb.toFixed(1)}MB,超过 ${limitMB}MB 上限。` +
+              (kind === "image" ? "请换一张更小的图片。"
+                                : "请先裁剪(建议只保留最关键的 5-15 秒)后再上传。"));
+      input.value = "";
+      nameEl.textContent = HINT_DEFAULT[nameId] || "";
+      nameEl.classList.add("muted");
+      setFile(null, null);
       return;
     }
     clearErr();
-    otherInput.value = ""; otherNameEl.textContent = "";
+    resetPickers(id);
     nameEl.textContent = `${f.name} · ${mb.toFixed(1)}MB`;
     nameEl.classList.remove("muted");
     setFile(f, kind);
   };
 }
-pickFile($("#video"), "video", MAX_VIDEO_MB, $("#vname"), $("#photo"), $("#iname"));
-pickFile($("#photo"), "image", MAX_IMAGE_MB, $("#iname"), $("#video"), $("#vname"));
 
 function setFile(f, kind) {
   file = f; fileKind = kind;
   const go = $("#go");
   go.disabled = !f;
   go.textContent = !f ? "选择素材后开始判读"
-    : (kind === "image" ? "开始判读(快速模式)" : "开始判读");
-  $("#framesmode").parentElement.style.display = kind === "image" ? "none" : "";
+    : kind === "image" ? "开始判读(快速模式)"
+    : kind === "audio" ? "开始判读(仅声学分析)"
+    : "开始判读";
+  // 抽帧链路只对视频有意义
+  $("#framesmode").parentElement.style.display = kind === "video" ? "" : "none";
 }
 function showErr(m){ const e=$("#formerr"); e.textContent=m; e.classList.remove("hide"); }
 function clearErr(){ $("#formerr").classList.add("hide"); }
@@ -249,7 +310,9 @@ $("#form").onsubmit = async e => {
   if (!parts.length) { showErr("请至少选一个场景标签,或写一句场景描述。"); return; }
   clearErr();
 
-  const mode = fileKind === "image" ? "quick" : ($("#framesmode").checked ? "frames" : "native");
+  const mode = fileKind === "image" ? "quick"
+             : fileKind === "audio" ? "audio"
+             : ($("#framesmode").checked ? "frames" : "native");
   const fd = new FormData();
   fd.append("file", file);
   fd.append("species", species);
@@ -405,9 +468,12 @@ function layer2(r) {
     const rng = Array.isArray(t.t_range) ? `${t.t_range[0]}s – ${t.t_range[1]}s` : esc(String(t.t_range || ""));
     const dir = String(t.direction || "");
     const cls = dir.includes("升级") ? "up" : dir.includes("缓解") ? "down" : "";
+    // 纯音频模式下没有视觉通道,不显示 👁 行,避免看起来像"漏了"
+    const visualRow = va.length === 0 && !t.visual ? ""
+      : `<div class="tlv">👁 ${esc(t.visual || "—")}</div>`;
     return `<div class="tlrow">
       <div class="tlt">${esc(rng)}${dir ? `<span class="tag ${cls}">${esc(dir)}</span>` : ""}</div>
-      <div class="tlv">👁 ${esc(t.visual || "—")}</div>
+      ${visualRow}
       <div class="tla">🔊 ${t.audio ? esc(String(t.audio)) : "无声学事件"}</div>
       ${t.motion ? `<div class="tla">📈 ${esc(String(t.motion))}</div>` : ""}
     </div>`;

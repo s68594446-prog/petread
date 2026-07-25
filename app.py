@@ -54,10 +54,12 @@ UPLOAD_DIR = os.path.join(store.DATA_DIR, "uploads")
 
 MAX_VIDEO_BYTES = 20 * 1024 * 1024      # 20MB,与前端提示保持一致
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_AUDIO_BYTES = 15 * 1024 * 1024
 CHUNK = 1024 * 1024
 
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".3gp"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".opus", ".caf", ".amr"}
 
 app = FastAPI(title="petread", docs_url="/docs")
 
@@ -129,6 +131,8 @@ async def _save_upload(upload: UploadFile, mode: str) -> tuple[str, int]:
     ext = os.path.splitext(upload.filename or "")[1].lower()
     if mode == "quick":
         allowed, limit, kind = IMAGE_EXTS, MAX_IMAGE_BYTES, "图片"
+    elif mode == "audio":
+        allowed, limit, kind = AUDIO_EXTS, MAX_AUDIO_BYTES, "音频"
     else:
         allowed, limit, kind = VIDEO_EXTS, MAX_VIDEO_BYTES, "视频"
 

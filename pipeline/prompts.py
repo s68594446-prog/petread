@@ -578,6 +578,66 @@ def mimo_system_preamble(now: datetime | None = None) -> str:
     )
 
 
+# 各模态下"结构性不可观测"的通道:不是没看清,而是这种素材里根本不存在该信息。
+# 判定证据是否充分时,这些通道必须从分母里剔除,否则单图/纯音频会被必然判为证据不足。
+_STRUCTURALLY_ABSENT = {
+    "image": {
+        "channels": ["displacement_signals", "affiliative_signals"],
+        "note": "位移信号与亲和信号都是动作序列,单帧无法判定;尾部/耳部的 motion 子维度同理。",
+    },
+    "audio": {
+        "channels": ["__all_visual__"],
+        "note": "纯音频没有任何画面,全部视觉通道都不适用。",
+    },
+    "video": {"channels": [], "note": ""},
+}
+
+
+def _sufficiency_rules(modality: str, knowledge: dict) -> str:
+    """按模态生成"证据是否充分"的判定规则。
+
+    视频有完整的时间+声音维度,门槛最高;单图与纯音频天然少若干通道,
+    沿用同一套门槛会导致"只要不是视频就必然证据不足",那是规则的缺陷而非事实。
+    """
+    if modality == "image":
+        return """insufficient_evidence 必须为 true(且 candidates 置空、insufficient_reason 必填)当:
+- 画面中没有目标物种,或个体被严重遮挡 / 过曝 / 模糊到读不出体态;
+- 静态可观测通道少于 3 个;
+- 知识库 meta.reading_order 中作为判读主轴的通道(体态)不可观测;
+- 所有候选的 confidence 都低于 0.5。
+
+【单图判定的重要校准】
+- 位移信号、亲和信号,以及尾部/耳部的 motion 子维度,在单帧中属于**结构性不可观测**,
+  写 "不可观测" 即可,**不要**把它们计入"通道不足"的分母,也不要因此判证据不足。
+- 只要个体清晰可见、体态与至少两个其他静态通道(耳位、尾位、瞳孔、胡须、口部、眼)可读,
+  就应当正常给出候选,不要因为"只有一张照片"这个理由本身判证据不足。
+- 但静态素材缺少时间维度,无法区分"瞬间姿态"与"持续状态",也无法看到变化方向。
+  因此单图的 confidence **上限建议 0.75**,并在每条 evidence 中如实反映这一局限。
+- 结论只描述该瞬间的状态,不要推断此前或此后会发生什么。"""
+
+    if modality == "audio":
+        return """insufficient_evidence 必须为 true(且 candidates 置空、insufficient_reason 必填)当:
+- 音频中没有目标物种的发声(只有环境噪声、人声、静音);
+- 所有发声事件都无法匹配到知识库 acoustic 表中的任何 pattern;
+- 所有候选的 confidence 都低于 0.5。
+
+【纯音频判定的重要校准】
+- 本次没有任何画面。**全部视觉通道都属于结构性不可观测**,visual_signals 输出空数组,
+  **不要**因为"看不到视觉信号"判证据不足——那是素材类型决定的,不是信息缺失。
+- 判读完全建立在声学证据上。知识库中若干发声(如犬的低吼、猫的 hiss)本身
+  confidence 就是"高",单独即可支撑候选。
+- 但缺少视觉通道意味着无法交叉验证,也无法应用大部分 context_modifiers。
+  因此纯音频的 confidence **上限建议 0.7**,并在 insufficient_reason 或 evidence 中说明该局限。
+- 声学上无法区分的模式(如犬的玩耍性低吼与威胁性低吼)**必须**并列为多个候选或明确指出
+  无法区分,不得只挑一个。"""
+
+    return """insufficient_evidence 必须为 true(且 candidates 置空、insufficient_reason 必填)当:
+- 可观测通道少于 3 个;
+- 知识库 meta.reading_order 中作为判读主轴的通道不可观测;
+- conflicts 中存在 resolved=false 且该冲突涉及判读主轴;
+- 所有候选的 confidence 都低于 0.5。"""
+
+
 def omni_prompt(
     species: str,
     context: str,
@@ -585,8 +645,12 @@ def omni_prompt(
     motion_features: dict,
     media_hint: str = "",
     now: datetime | None = None,
+    modality: str = "video",
 ) -> Prompt:
     """全模态单次调用:视觉编码 + 声学编码 + 时序对齐 + 规则裁决 + 候选输出。
+
+    ``modality`` ∈ {video, image, audio},决定"证据是否充分"的判定门槛:
+    单图与纯音频天然缺少某些通道,不能沿用视频的门槛。
 
     ``media_hint`` 用于说明本次附带的媒体形态(整段视频 / 若干抽帧 + 音轨),
     让模型知道时间戳的参照系。
@@ -612,21 +676,19 @@ def omni_prompt(
         except (TypeError, ValueError):
             continue
 
-    user = f"""【任务】对附带的媒体做一次完整判读:视觉信号编码、声学事件编码、时序对齐、
-规则裁决、给出带依据的状态候选。一次输出全部结果。
+    absent = _STRUCTURALLY_ABSENT.get(modality, _STRUCTURALLY_ABSENT["video"])
+    modality_label = {"video": "视频(含音轨)", "image": "单张静态照片",
+                      "audio": "纯音频(无画面)"}.get(modality, modality)
 
-【本次媒体】
-{media_hint or "见本条消息附带的内容"}
+    if modality == "audio":
+        step1 = """════════ 第一步:视觉信号编码(填入 visual_signals) ════════
 
-【拍摄情境】(由用户提供,可能不准确;与媒体内容冲突时以媒体为准)
-{context or "（未提供）"}
+本次是纯音频,没有任何画面。**visual_signals 直接输出空数组 `[]`**,不要编造视觉观察。
+timeline 中的 visual 字段一律写 null。这不是信息缺失,是素材类型决定的。"""
+    else:
+        step1 = f"""════════ 第一步:视觉信号编码(填入 visual_signals) ════════
 
-【运动学指标】由帧差曲线计算得出,可作为动作幅度与节律的旁证:
-{_dump_json(motion_features)}
-
-════════ 第一步:视觉信号编码(填入 visual_signals) ════════
-
-在时间轴上选取信号发生变化的时刻(不要均匀采样),对每个时刻遍历知识库 signals
+{"本次是单张静态照片,visual_signals 只输出一条记录,t 写 0。" if modality == "image" else "在时间轴上选取信号发生变化的时刻(不要均匀采样),"}对每个时刻遍历知识库 signals
 下的全部通道并逐个填写:
 {channels}
 - 取值必须严格来自该通道的 values 列表,不得自创描述。
@@ -635,8 +697,14 @@ def omni_prompt(
 - 因品种形态学而结构性不可用的通道(见各通道 caveats)同样写 "不可观测"。
 - 每个取值同时给出它在知识库里的 value_confidence 等级。
 - 每条记录必须带时间戳 t。
+{f"- 本次素材中以下通道属于结构性不可观测,写 “不可观测” 即可,不必勉强判读:{absent['channels']}。{absent['note']}" if absent["channels"] else ""}"""
 
-════════ 第二步:声学事件编码(填入 audio_events) ════════
+    if modality == "image":
+        step2 = """════════ 第二步:声学事件编码(填入 audio_events) ════════
+
+单张照片没有音轨,**audio_events 直接输出空数组 `[]`**。不要编造发声。"""
+    else:
+        step2 = f"""════════ 第二步:声学事件编码(填入 audio_events) ════════
 
 找出音轨中每一个可判读的发声事件,描述其时长、基频走向、估计基频范围、音节数、
 有无颤抖成分、能量包络、有无宽带噪声成分,然后匹配到知识库 acoustic 表中的一项:
@@ -647,7 +715,25 @@ def omni_prompt(
 - 每个事件必须带 t_start / t_end,精确到 0.1 秒。
 - 知识库中的 f0_range 是粗分档不是精确阈值,偏离几十赫兹不影响匹配,偏离一个数量级时写 "未匹配"。
 - 低频事件(如 purr 的 25-30Hz)可能低于录音与压缩的有效响应下限,未检测到不等于未发生。
-- 无任何目标物种发声时 audio_events 输出空数组,这是合法结果,不要把环境噪声当成发声。
+- 无任何目标物种发声时 audio_events 输出空数组,这是合法结果,不要把环境噪声当成发声。"""
+
+    user = f"""【任务】对附带的媒体做一次完整判读:视觉信号编码、声学事件编码、时序对齐、
+规则裁决、给出带依据的状态候选。一次输出全部结果。
+
+【本次素材类型】{modality_label}
+
+【本次媒体】
+{media_hint or "见本条消息附带的内容"}
+
+【拍摄情境】(由用户提供,可能不准确;与媒体内容冲突时以媒体为准)
+{context or "（未提供）"}
+
+【运动学指标】由帧差曲线计算得出,可作为动作幅度与节律的旁证:
+{_dump_json(motion_features)}
+
+{step1}
+
+{step2}
 
 ════════ 第三步:时序对齐(填入 timeline) ════════
 
@@ -674,12 +760,10 @@ candidates:
 - 低置信度(低)的信号不得单独支撑一个候选,至少要有一条中或高置信度证据。
 - 候选可以为空数组。
 
-insufficient_evidence 必须为 true(且 candidates 置空、insufficient_reason 必填)当:
-- 可观测通道少于 3 个;
-- 知识库 meta.reading_order 中作为判读主轴的通道不可观测;
-- conflicts 中存在 resolved=false 且该冲突涉及判读主轴;
-- 所有候选的 confidence 都低于 0.5。
+{_sufficiency_rules(modality, knowledge)}
+
 证据不足是合法且有价值的结论。禁止为了给出答案而降低标准、拼凑证据或提高置信度。
+反过来也一样:**证据确实充分时不得为了显得谨慎而判证据不足**,那同样是错误输出。
 
 translation:
 - 这是本次输出中唯一允许拟人化的字段,一句话,用第一人称。
