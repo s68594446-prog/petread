@@ -148,6 +148,53 @@ def _row_to_record(row: sqlite3.Row) -> dict:
     return item
 
 
+def iter_export_rows(db_path: str | None = None) -> list[dict]:
+    """导出用:每条 record 一行,展开其结果摘要与所有反馈。
+
+    一条 record 可能有多条反馈,这里把它们合并成分号分隔的字符串,
+    保证导出仍是"一记录一行"的宽表,便于直接丢进表格软件做校准回顾。
+    """
+    with connect(db_path) as conn:
+        records = conn.execute(
+            "SELECT * FROM records ORDER BY id ASC"
+        ).fetchall()
+        fb_rows = conn.execute(
+            "SELECT record_id, actual_label, user_note, created_at "
+            "FROM feedback ORDER BY record_id ASC, id ASC"
+        ).fetchall()
+
+    fb_by_record: dict[int, list[sqlite3.Row]] = {}
+    for f in fb_rows:
+        fb_by_record.setdefault(f["record_id"], []).append(f)
+
+    out: list[dict] = []
+    for r in records:
+        rec = _row_to_record(r)
+        result = rec.get("result") or {}
+        fbs = fb_by_record.get(rec["id"], [])
+        actual = "; ".join(f["actual_label"] for f in fbs if f["actual_label"])
+        notes = "; ".join(f["user_note"] for f in fbs if f["user_note"])
+        out.append({
+            "id": rec["id"],
+            "created_at": rec["created_at"],
+            "species": rec["species"],
+            "mode": rec["mode"],
+            "context": rec["context"],
+            "predicted_label": rec.get("predicted_label"),
+            "confidence": rec.get("confidence"),
+            "insufficient_evidence": bool(result.get("insufficient_evidence")),
+            "translation": result.get("translation"),
+            "actual_label": actual,
+            "user_note": notes,
+            "feedback_count": len(fbs),
+            "tokens_in": rec.get("tokens_in"),
+            "tokens_out": rec.get("tokens_out"),
+            "latency_s": rec.get("latency_s"),
+            "model": rec.get("model"),
+        })
+    return out
+
+
 # ---------------------------------------------------------------------------
 # feedback
 # ---------------------------------------------------------------------------

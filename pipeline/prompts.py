@@ -557,6 +557,28 @@ OMNI_SCHEMA = {
             ],
         }
     ],
+    "segment_consistency": {
+        "segments": [
+            {
+                "t_range": "[起点秒, 终点秒]",
+                "reading": "该时间段单独看得出的状态",
+            }
+        ],
+        "agreement": "consistent | mixed | contradictory",
+        "note": "各段是否一致的一句话说明;单图/纯音频只有一段时写明无法评估稳定性",
+        "confidence_effect": "一致→上调 / 矛盾→下调 / 无法评估→维持,并说明对最终置信度的影响",
+    },
+    "counter_evidence": {
+        "counter_hypotheses": [
+            {
+                "alternative": "与主判断相反或不同的假设",
+                "would_look_like": "若该假设成立,画面/声音里本应出现什么信号",
+                "present_in_media": "上述反方信号在本次素材里是否真的出现:是 | 否 | 无法确认",
+            }
+        ],
+        "verdict": "主判断在排除以上反方后是否仍然成立:成立 | 减弱 | 存疑",
+        "note": "一句话总结反方论证的结论",
+    },
     "insufficient_evidence": "true 或 false",
     "insufficient_reason": "为 true 时必填,说明缺什么;否则写 null",
     "translation": "一句话的拟人化表达",
@@ -665,6 +687,24 @@ def _sufficiency_rules(modality: str, knowledge: dict) -> str:
 - 知识库 meta.reading_order 中作为判读主轴的通道不可观测;
 - conflicts 中存在 resolved=false 且该冲突涉及判读主轴;
 - 所有候选的 confidence 都低于 0.5。"""
+
+
+def _consistency_block(modality: str) -> str:
+    """多帧一致性判据。视频要真的分段自检,单图/纯音频只有一段无法评估稳定性。"""
+    if modality == "video":
+        return """把视频按时间切成 2–4 段(与第三步的 timeline 时段可以对齐),
+**对每一段单独得出一个状态读数**,填进 segment_consistency.segments。然后:
+- 各段读数一致 → agreement = "consistent",这提高了判断的可靠性,
+  最终候选的 confidence 可以**上调**(仍不超过该模态的上限)。
+- 各段读数分歧 → agreement = "mixed" 或 "contradictory",说明状态在变化或本就不稳定,
+  最终候选的 confidence 必须**下调**,并在 note 里说明是哪几段冲突。
+- confidence_effect 里写清楚这次一致性检查最终把置信度往哪个方向调了。
+目的:让置信度反映**跨时间的稳定性**,而不是被某一个瞬间的强烈表情带偏。"""
+    label = "单张照片只有一个瞬间" if modality == "image" else "纯音频不分视觉时段"
+    return f"""本次是{'单图' if modality == 'image' else '纯音频'},{label},无法做跨时段的一致性自检。
+segment_consistency.segments 只放一段(或留空),agreement 写 "unassessable",
+note 说明"素材只有单一时间切面,稳定性无法评估",confidence_effect 写"维持,不因一致性加分"。
+**不得**因为"看起来很一致"而给单一时间切面的判断加置信度。"""
 
 
 def omni_prompt(
@@ -796,6 +836,24 @@ candidates:
 
 证据不足是合法且有价值的结论。禁止为了给出答案而降低标准、拼凑证据或提高置信度。
 反过来也一样:**证据确实充分时不得为了显得谨慎而判证据不足**,那同样是错误输出。
+
+════════ 第六步:多帧一致性(填入 segment_consistency) ════════
+{_consistency_block(modality)}
+
+════════ 第七步:反方论证(填入 counter_evidence)—— 强制,不可跳过 ════════
+
+给出主判断后,必须反过来论证"它在什么情况下是错的"。这一步的目的是压制
+"看着自信、实则证据不足"的判断。
+
+- 针对置信度最高的候选,列出 1–3 个 counter_hypotheses(反方假设):
+  可以是完全相反的状态,也可以是"同一形态的另一种常见解释"(参考知识库的
+  context_modifiers 与 conflict_rules,那里记录了大量"形态相同、含义相反"的情形)。
+- 对每个反方假设,写出 would_look_like:如果它成立,画面/声音里**本应**出现哪些信号。
+- 再写 present_in_media:那些反方信号在本次素材里**是否真的出现**(是 / 否 / 无法确认)。
+- verdict:排除这些反方后,主判断是"成立 / 减弱 / 存疑"。
+- **若某个反方假设的支持信号确实出现(present_in_media=是),必须相应下调主候选的
+  confidence,或把该反方也列为一个候选。** 不允许一边承认反方信号存在、一边维持高置信度。
+- insufficient_evidence 为 true 时,counter_evidence 可只写一句"证据不足,无主判断可供反驳"。
 
 translation:
 - 这是本次输出中唯一允许拟人化的字段,一句话,用第一人称。

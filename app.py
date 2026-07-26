@@ -23,14 +23,17 @@ EventSource 自带的断线重连——一次判读 20-30 秒,断了重传即可
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import os
 import time
 import uuid
+from datetime import datetime
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -319,6 +322,54 @@ def history(limit: int = 30, offset: int = 0) -> JSONResponse:
             "last_actual_label": r.get("last_actual_label"),
         })
     return JSONResponse({"items": items, "limit": limit, "offset": offset})
+
+
+# 导出列顺序与中文表头(给校准回顾用,直接能丢进表格软件)
+_EXPORT_COLUMNS = [
+    ("id", "记录ID"),
+    ("created_at", "时间"),
+    ("species", "物种"),
+    ("mode", "模式"),
+    ("context", "场景"),
+    ("predicted_label", "模型判断"),
+    ("confidence", "置信度"),
+    ("insufficient_evidence", "是否信息不足"),
+    ("translation", "模型翻译"),
+    ("actual_label", "用户反馈-实际"),
+    ("user_note", "用户反馈-备注"),
+    ("feedback_count", "反馈条数"),
+    ("tokens_in", "输入token"),
+    ("tokens_out", "输出token"),
+    ("latency_s", "耗时秒"),
+    ("model", "模型"),
+]
+
+
+@app.get("/export")
+def export_csv() -> Response:
+    """导出所有 records + feedback 为 CSV,供个体校准回顾。"""
+    rows = store.iter_export_rows()
+    buf = io.StringIO()
+    buf.write("﻿")          # UTF-8 BOM,让 Excel 正确识别中文
+    writer = csv.writer(buf)
+    writer.writerow([zh for _, zh in _EXPORT_COLUMNS])
+    for r in rows:
+        line = []
+        for key, _ in _EXPORT_COLUMNS:
+            v = r.get(key)
+            if isinstance(v, bool):
+                v = "是" if v else "否"
+            line.append("" if v is None else v)
+        writer.writerow(line)
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="petread_export_{stamp}.csv"',
+        },
+    )
 
 
 @app.get("/record/{record_id}")

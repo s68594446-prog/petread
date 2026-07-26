@@ -3,140 +3,233 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#111417">
+<meta name="theme-color" content="#0d1014" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)">
 <title>petread · 宠物行为判读</title>
 <style>
   :root{
-    --bg:#f6f7f9; --card:#fff; --fg:#14181d; --muted:#6b7480; --line:#e3e7ec;
-    --accent:#3f6ef2; --accent-fg:#fff; --warn-bg:#fff6e5; --warn-line:#f0c169;
-    --warn-fg:#8a5a00; --ok:#1f9254; --danger:#c0392b; --chip:#eef1f5;
-    --radius:14px;
+    --bg:#f4f5f7; --card:#ffffff; --card2:#f8f9fb; --fg:#111721; --muted:#69727e;
+    --line:#e6e9ee; --accent:#4f6ef7; --accent-fg:#fff;
+    --lo:#e8912f; --mid:#4f6ef7; --hi:#1faa5a;           /* 置信度分档色 */
+    --warn-bg:#fff7e8; --warn-line:#f0cd82; --warn-fg:#8a5a00;
+    --ok:#1faa5a; --danger:#d84b3a; --chip:#eef1f6; --track:#e6e9ee;
+    --up-bg:#fdecea; --up-fg:#c0392b; --down-bg:#e7f6ee; --down-fg:#1a8a4e;
+    --radius:16px; --shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 28px rgba(16,24,40,.06);
   }
   @media (prefers-color-scheme: dark){
     :root{
-      --bg:#0f1216; --card:#171b21; --fg:#e8ecf1; --muted:#98a2ae; --line:#262c35;
-      --accent:#5b86ff; --warn-bg:#2e2410; --warn-line:#7a5c16; --warn-fg:#f0c169;
-      --ok:#43c07d; --danger:#ff6b5a; --chip:#222831;
+      --bg:#0d1014; --card:#161a21; --card2:#1b2028; --fg:#e9edf3; --muted:#98a2ae;
+      --line:#272d37; --accent:#6b8bff; --accent-fg:#0d1014;
+      --lo:#e5a24a; --mid:#6b8bff; --hi:#43c07d;
+      --warn-bg:#2b2411; --warn-line:#6f571c; --warn-fg:#f0c877;
+      --ok:#43c07d; --danger:#ff6b5a; --chip:#232a34; --track:#2a313c;
+      --up-bg:#3a1d1a; --up-fg:#ff9d90; --down-bg:#12301f; --down-fg:#5fd396;
+      --shadow:0 1px 2px rgba(0,0,0,.3), 0 12px 32px rgba(0,0,0,.4);
     }
   }
+  @property --pct{ syntax:'<number>'; inherits:false; initial-value:0; }
   *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
   body{
     margin:0; background:var(--bg); color:var(--fg);
-    font:16px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB",
+    font:16px/1.62 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB",
       "Microsoft YaHei",system-ui,sans-serif;
-    padding:0 0 env(safe-area-inset-bottom);
-    -webkit-text-size-adjust:100%;
+    padding:0 0 calc(40px + env(safe-area-inset-bottom));
   }
-  .wrap{max-width:680px;margin:0 auto;padding:16px 14px 48px}
-  header{display:flex;align-items:baseline;gap:10px;padding:8px 2px 16px}
-  header h1{font-size:20px;margin:0;letter-spacing:.5px}
+  .wrap{max-width:640px;margin:0 auto;padding:18px 15px}
+  header{display:flex;align-items:center;gap:10px;padding:6px 4px 18px}
+  header .logo{font-size:22px}
+  header h1{font-size:19px;margin:0;font-weight:700;letter-spacing:.3px}
   header .sub{color:var(--muted);font-size:13px}
+
   .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-    padding:16px;margin-bottom:14px}
-  .card h2{font-size:15px;margin:0 0 12px;font-weight:600}
-  label.blk{display:block;font-size:13px;color:var(--muted);margin:0 0 6px}
+    padding:18px;margin-bottom:14px;box-shadow:var(--shadow)}
+  .card.hero{padding:22px 20px}
+  h2.sec{font-size:13px;margin:0 0 12px;font-weight:600;color:var(--muted);
+    letter-spacing:.4px;text-transform:none}
+  .step{font-size:13px;font-weight:700;color:var(--accent);margin-right:6px}
+
+  /* -------- chips / inputs -------- */
   .chips{display:flex;flex-wrap:wrap;gap:8px}
-  .chip{
-    padding:8px 13px;border-radius:999px;border:1px solid var(--line);
+  .chip{padding:8px 14px;border-radius:999px;border:1px solid var(--line);
     background:var(--chip);font-size:14px;cursor:pointer;user-select:none;
-    -webkit-tap-highlight-color:transparent;transition:.12s;
-  }
+    -webkit-tap-highlight-color:transparent;transition:.14s}
+  .chip:active{transform:scale(.96)}
   .chip[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg);
     border-color:var(--accent)}
-  textarea,input[type=text]{
-    width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);
-    background:var(--bg);color:var(--fg);font:inherit;font-size:15px;resize:vertical;
-  }
+  label.blk{display:block;font-size:13px;color:var(--muted);margin:14px 0 7px}
+  textarea,input[type=text]{width:100%;padding:12px 13px;border-radius:11px;
+    border:1px solid var(--line);background:var(--card2);color:var(--fg);
+    font:inherit;font-size:15px;resize:vertical}
   textarea:focus,input:focus{outline:2px solid var(--accent);outline-offset:-1px}
-  .filebtn{
-    display:block;width:100%;padding:18px;border-radius:12px;text-align:center;
-    border:1.5px dashed var(--line);background:var(--bg);cursor:pointer;
-    font-size:16px;font-weight:600;
-  }
-  .filebtn.sec{padding:12px;font-size:14px;font-weight:400;color:var(--muted)}
+
+  .filebtn{display:block;width:100%;padding:20px;border-radius:13px;text-align:center;
+    border:1.5px dashed var(--line);background:var(--card2);cursor:pointer;
+    font-size:16px;font-weight:600;transition:.14s}
+  .filebtn:active{transform:scale(.99)}
+  .filebtn.sec{padding:14px;font-size:14px;font-weight:500;color:var(--muted)}
+  .filebtn.has{border-style:solid;border-color:var(--accent)}
   .filebtn input{display:none}
-  .minibtn{
-    padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--chip);
-    font-size:13px;cursor:pointer;-webkit-tap-highlight-color:transparent;
-  }
+  .minibtn{padding:7px 13px;border-radius:9px;border:1px solid var(--line);
+    background:var(--chip);font-size:13px;cursor:pointer;-webkit-tap-highlight-color:transparent}
   .minibtn input{display:none}
-  .filename{font-size:13px;color:var(--muted);margin-top:8px;word-break:break-all}
-  button.go{
-    width:100%;padding:15px;border:0;border-radius:12px;background:var(--accent);
-    color:var(--accent-fg);font-size:17px;font-weight:600;cursor:pointer;
-  }
-  button.go:disabled{opacity:.45;cursor:not-allowed}
-  .row{display:flex;gap:8px;align-items:center}
-  .err{background:#fdecea;color:#8b1e12;border:1px solid #f5c4bd;padding:11px 13px;
-    border-radius:10px;font-size:14px;margin-top:10px}
-  @media (prefers-color-scheme: dark){.err{background:#331816;color:#ffb3a8;border-color:#5c2a24}}
-  progress{width:100%;height:8px;appearance:none;border:0;border-radius:99px;overflow:hidden}
-  progress::-webkit-progress-bar{background:var(--chip);border-radius:99px}
-  progress::-webkit-progress-value{background:var(--accent);border-radius:99px}
-  .stage{font-size:13px;color:var(--muted);margin-top:8px;display:flex;
+  .filename{font-size:13px;color:var(--muted);margin-top:9px;word-break:break-all}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+  button.go{width:100%;padding:16px;border:0;border-radius:13px;background:var(--accent);
+    color:var(--accent-fg);font-size:17px;font-weight:700;cursor:pointer;transition:.14s}
+  button.go:active{transform:scale(.99)}
+  button.go:disabled{opacity:.4;cursor:not-allowed}
+  .err{background:var(--up-bg);color:var(--up-fg);border:1px solid var(--warn-line);
+    padding:11px 13px;border-radius:11px;font-size:14px;margin-top:12px}
+
+  /* -------- progress -------- */
+  progress{width:100%;height:9px;appearance:none;border:0;border-radius:99px;overflow:hidden}
+  progress::-webkit-progress-bar{background:var(--track);border-radius:99px}
+  progress::-webkit-progress-value{background:var(--accent);border-radius:99px;transition:.3s}
+  progress::-moz-progress-bar{background:var(--accent);border-radius:99px}
+  .stage{font-size:13px;color:var(--muted);margin-top:10px;display:flex;
     justify-content:space-between;gap:10px}
-  .verdict{font-size:22px;font-weight:650;line-height:1.45;margin:2px 0 14px}
-  .confbar{height:8px;background:var(--chip);border-radius:99px;overflow:hidden;margin:6px 0}
-  .confbar i{display:block;height:100%;background:var(--ok);border-radius:99px}
-  .meta{font-size:12px;color:var(--muted);margin-top:12px;
-    border-top:1px solid var(--line);padding-top:10px}
+
+  /* -------- hero result -------- */
+  .heroTop{display:flex;gap:18px;align-items:center}
+  .ring{position:relative;flex:0 0 auto;width:112px;height:112px;border-radius:50%;
+    background:conic-gradient(var(--rc,var(--mid)) calc(var(--pct)*3.6deg), var(--track) 0deg);
+    transition:--pct .9s cubic-bezier(.22,1,.36,1)}
+  .ring .hole{position:absolute;inset:11px;border-radius:50%;background:var(--card);
+    display:grid;place-items:center;text-align:center;line-height:1.1}
+  .ring .val{font-size:26px;font-weight:750;font-variant-numeric:tabular-nums}
+  .ring .lbl{font-size:11px;color:var(--muted);margin-top:2px}
+  .heroText{min-width:0}
+  .verdict{font-size:21px;font-weight:700;line-height:1.42;margin:0 0 8px;
+    letter-spacing:.2px}
+  .toplabel{font-size:13px;color:var(--muted)}
+  .toplabel b{color:var(--fg);font-weight:650}
+  .altline{font-size:13px;color:var(--muted);margin-top:12px}
+  .altpill{display:inline-block;background:var(--chip);border-radius:99px;
+    padding:2px 10px;margin:0 6px 6px 0;font-size:12.5px}
+
+  .block{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+  .block .bt{font-size:12px;font-weight:700;color:var(--muted);letter-spacing:.4px;
+    margin-bottom:8px}
+  .suggest{background:var(--card2);border:1px solid var(--line);border-radius:12px;
+    padding:14px;font-size:15px;line-height:1.6}
+  .suggest .bt{color:var(--accent)}
+
+  /* consistency badge */
+  .badge{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;
+    padding:4px 11px;border-radius:99px;border:1px solid transparent}
+  .badge.consistent{background:var(--down-bg);color:var(--down-fg)}
+  .badge.mixed{background:var(--warn-bg);color:var(--warn-fg)}
+  .badge.contradictory{background:var(--up-bg);color:var(--up-fg)}
+  .badge.unassessable{background:var(--chip);color:var(--muted)}
+  .cnote{font-size:13px;color:var(--muted);margin-top:8px}
+
+  /* insufficient */
   .insuf{background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn-fg);
-    border-radius:12px;padding:14px;margin-bottom:12px}
-  .insuf b{display:block;font-size:17px;margin-bottom:6px}
-  details{border-top:1px solid var(--line);padding:12px 0 2px;margin-top:12px}
-  details summary{cursor:pointer;font-size:14px;font-weight:600;list-style:none;
-    display:flex;justify-content:space-between;align-items:center}
-  details summary::-webkit-details-marker{display:none}
-  details summary::after{content:"展开";color:var(--muted);font-weight:400;font-size:13px}
-  details[open] summary::after{content:"收起"}
-  .tl{margin-top:12px;display:flex;flex-direction:column;gap:10px}
-  .tlrow{border-left:3px solid var(--accent);padding:2px 0 2px 11px}
-  .tlt{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+    border-radius:13px;padding:16px 16px 15px}
+  .insuf .ttl{display:flex;align-items:center;gap:8px;font-size:17px;font-weight:700;
+    margin-bottom:7px}
+  .insuf .rsn{font-size:14.5px;line-height:1.55}
+
+  /* meta strip */
+  .meta{font-size:12px;color:var(--muted);margin-top:16px;padding-top:12px;
+    border-top:1px solid var(--line);display:flex;flex-wrap:wrap;gap:4px 12px}
+
+  /* -------- details / layers -------- */
+  details.layer{margin-top:14px;border:1px solid var(--line);border-radius:13px;
+    background:var(--card2);overflow:hidden}
+  details.layer>summary{cursor:pointer;font-size:14px;font-weight:600;list-style:none;
+    display:flex;justify-content:space-between;align-items:center;padding:14px 16px}
+  details.layer>summary::-webkit-details-marker{display:none}
+  details.layer>summary .chev{color:var(--muted);font-weight:400;font-size:13px;
+    transition:.2s}
+  details.layer[open]>summary .chev{transform:rotate(180deg)}
+  details.layer .body{padding:0 16px 16px}
+
+  /* timeline */
+  .tl{display:flex;flex-direction:column;gap:0}
+  .tlrow{position:relative;padding:0 0 16px 20px;border-left:2px solid var(--line)}
+  .tlrow:last-child{border-left-color:transparent;padding-bottom:0}
+  .tlrow::before{content:"";position:absolute;left:-6px;top:3px;width:10px;height:10px;
+    border-radius:50%;background:var(--accent);border:2px solid var(--card2)}
+  .tlrow.up::before{background:var(--up-fg)} .tlrow.down::before{background:var(--down-fg)}
+  .tlt{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;
+    display:flex;align-items:center;gap:8px;margin-bottom:3px}
   .tlv{font-size:14px}
-  .tla{font-size:13px;color:var(--muted)}
-  .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:99px;
-    background:var(--chip);color:var(--muted);margin-left:6px}
-  .tag.up{background:#fdecea;color:#c0392b}
-  .tag.down{background:#e8f7ee;color:#1f9254}
-  @media (prefers-color-scheme: dark){
-    .tag.up{background:#3a1d1a;color:#ff9d90}.tag.down{background:#12301f;color:#5fd396}
-  }
-  pre{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px;
-    overflow-x:auto;font-size:11.5px;line-height:1.5;max-height:60vh}
-  .ev{font-size:13px;color:var(--muted);margin:4px 0 0;padding-left:14px;
+  .tla{font-size:13px;color:var(--muted);margin-top:2px}
+  .tag{display:inline-block;font-size:11px;padding:1px 8px;border-radius:99px;
+    background:var(--chip);color:var(--muted)}
+  .tag.up{background:var(--up-bg);color:var(--up-fg)}
+  .tag.down{background:var(--down-bg);color:var(--down-fg)}
+  .tag.yes{background:var(--up-bg);color:var(--up-fg)}
+  .tag.no{background:var(--down-bg);color:var(--down-fg)}
+  .tag.maybe{background:var(--chip);color:var(--muted)}
+
+  .ev{font-size:13px;color:var(--muted);margin:6px 0 0;padding-left:12px;
     border-left:2px solid var(--line)}
-  .hist{font-size:14px;border-bottom:1px solid var(--line);padding:11px 0}
+  .ev b{color:var(--fg)}
+  .subttl{font-size:13px;font-weight:700;margin:16px 0 6px}
+  .hyp{border:1px solid var(--line);border-radius:10px;padding:11px 12px;margin-top:8px;
+    background:var(--card)}
+  .hyp .alt{font-size:14px;font-weight:600}
+  .hyp .look{font-size:13px;color:var(--muted);margin-top:4px}
+
+  pre{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:13px;
+    overflow-x:auto;font-size:11.5px;line-height:1.5;max-height:56vh;margin:0}
+
+  /* -------- feedback -------- */
+  .fbcard .hint{font-size:13px;color:var(--muted);margin-bottom:11px}
+
+  /* -------- history -------- */
+  .histhead{display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .lnk{background:none;border:1px solid var(--line);border-radius:9px;color:var(--fg);
+    font:inherit;font-size:13px;padding:7px 12px;cursor:pointer;display:inline-flex;
+    align-items:center;gap:5px}
+  .lnk:active{transform:scale(.97)}
+  .hist{font-size:14px;border-bottom:1px solid var(--line);padding:12px 0;display:block;
+    text-decoration:none;color:inherit}
   .hist:last-child{border-bottom:0}
   .hist .h1{display:flex;justify-content:space-between;gap:10px}
   .hist .h2{font-size:12px;color:var(--muted);margin-top:3px}
-  .muted{color:var(--muted)}
-  .ok{color:var(--ok)}
-  .hide{display:none}
+  .hpct{font-variant-numeric:tabular-nums;white-space:nowrap;font-weight:650}
+
+  .muted{color:var(--muted)} .ok{color:var(--ok)} .hide{display:none}
 </style>
 </head>
 <body>
 <div class="wrap">
 
 <header>
+  <span class="logo">🐾</span>
   <h1>petread</h1>
   <span class="sub">宠物行为判读</span>
 </header>
 
+<!-- ============ 进度 ============ -->
+<div class="card hide" id="progcard">
+  <h2 class="sec">判读中</h2>
+  <progress id="bar" max="100" value="0"></progress>
+  <div class="stage"><span id="stagetext">准备中…</span><span id="elapsed" class="muted"></span></div>
+</div>
+
+<!-- ============ 结果(主体) ============ -->
+<div id="result"></div>
+
 <!-- ============ 输入 ============ -->
 <form id="form" class="card">
-  <h2>1 · 这是谁</h2>
+  <h2 class="sec"><span class="step">1</span>这是谁</h2>
   <div class="chips" id="species" role="group" aria-label="物种">
     <button type="button" class="chip" data-v="dog" aria-pressed="true">🐕 狗</button>
     <button type="button" class="chip" data-v="cat" aria-pressed="false">🐈 猫</button>
   </div>
 
-  <h2 style="margin-top:20px">2 · 什么场景</h2>
-  <label class="blk">选标签(可多选)</label>
+  <h2 class="sec" style="margin-top:22px"><span class="step">2</span>什么场景</h2>
   <div class="chips" id="scenes" role="group" aria-label="场景标签"></div>
-  <label class="blk" style="margin-top:12px">补充描述(越具体越准)</label>
+  <label class="blk">补充描述(越具体越准)</label>
   <textarea id="ctx" rows="2" placeholder="例:客厅,快递员按门铃,它冲到门口"></textarea>
 
-  <h2 style="margin-top:20px">3 · 素材</h2>
+  <h2 class="sec" style="margin-top:22px"><span class="step">3</span>素材</h2>
   <label class="filebtn" id="vlabel">
     🎥 选一段视频
     <input type="file" id="video" accept="video/*">
@@ -155,43 +248,35 @@
 
   <div class="row" style="margin-top:12px">
     <span class="muted" style="font-size:13px">或直接拍摄:</span>
-    <label class="minibtn">📹 录像
-      <input type="file" id="videoCap" accept="video/*" capture="environment"></label>
-    <label class="minibtn">📸 拍照
-      <input type="file" id="photoCap" accept="image/*" capture="environment"></label>
+    <label class="minibtn">📹 录像<input type="file" id="videoCap" accept="video/*" capture="environment"></label>
+    <label class="minibtn">📸 拍照<input type="file" id="photoCap" accept="image/*" capture="environment"></label>
   </div>
 
   <div class="row" style="margin-top:14px">
     <input type="checkbox" id="framesmode" style="width:auto">
-    <label for="framesmode" class="muted" style="font-size:13px;margin:0">
-      用抽帧链路(对比用,更慢更贵)
-    </label>
+    <label for="framesmode" class="muted" style="font-size:13px;margin:0">用抽帧链路(对比用,更慢更贵)</label>
   </div>
 
   <div id="formerr" class="err hide"></div>
-  <button class="go" id="go" type="submit" style="margin-top:14px" disabled>
-    选择素材后开始判读
-  </button>
+  <button class="go" id="go" type="submit" style="margin-top:16px" disabled>选择素材后开始判读</button>
 </form>
 
-<!-- ============ 进度 ============ -->
-<div class="card hide" id="progcard">
-  <h2>判读中</h2>
-  <progress id="bar" max="100" value="0"></progress>
-  <div class="stage">
-    <span id="stagetext">准备中…</span>
-    <span id="elapsed" class="muted"></span>
+<!-- ============ 历史(默认折叠) ============ -->
+<details class="card" id="histcard" style="padding:0">
+  <summary class="histhead" style="padding:16px 18px;cursor:pointer;list-style:none">
+    <span style="font-weight:600;font-size:15px">历史记录 <span class="muted" style="font-weight:400" id="histcount"></span></span>
+    <span class="row" style="gap:8px">
+      <span class="lnk" id="exportbtn" role="button">⬇︎ 导出 CSV</span>
+      <span class="chev muted" style="font-size:13px">▾</span>
+    </span>
+  </summary>
+  <div style="padding:0 18px 16px">
+    <div class="muted" style="font-size:12px;margin-bottom:6px">
+      每条判读都会留存,作为个体校准的数据来源。点上方按钮导出全部记录与你的反馈。
+    </div>
+    <div id="hist" class="muted" style="font-size:14px">加载中…</div>
   </div>
-</div>
-
-<!-- ============ 结果 ============ -->
-<div id="result"></div>
-
-<!-- ============ 历史 ============ -->
-<div class="card">
-  <h2>历史记录 <span class="muted" style="font-weight:400" id="histcount"></span></h2>
-  <div id="hist" class="muted" style="font-size:14px">加载中…</div>
-</div>
+</details>
 
 </div>
 
@@ -201,14 +286,12 @@
 const MAX_VIDEO_MB = 20, MAX_IMAGE_MB = 10, MAX_AUDIO_MB = 15;
 const SCENES = ["吃饭前","见生人","独处","主人回家","看到其他动物","玩耍中"];
 const $ = s => document.querySelector(s);
-
 let species = "dog", picked = new Set(), file = null, fileKind = null;
 
-/* ---------- 场景标签 ---------- */
+/* ---------- 场景 / 物种 ---------- */
 SCENES.forEach(s => {
   const b = document.createElement("button");
-  b.type = "button"; b.className = "chip"; b.textContent = s;
-  b.setAttribute("aria-pressed", "false");
+  b.type = "button"; b.className = "chip"; b.textContent = s; b.setAttribute("aria-pressed","false");
   b.onclick = () => {
     const on = b.getAttribute("aria-pressed") === "true";
     b.setAttribute("aria-pressed", String(!on));
@@ -216,333 +299,291 @@ SCENES.forEach(s => {
   };
   $("#scenes").appendChild(b);
 });
-
 $("#species").onclick = e => {
   const b = e.target.closest(".chip"); if (!b) return;
   [...$("#species").children].forEach(c => c.setAttribute("aria-pressed", String(c === b)));
   species = b.dataset.v;
 };
 
-/* ---------- 文件选择 ----------
-   五个 input(视频/图片/音频 各一个从文件选,外加两个 capture 直拍),
-   任选其一,选中后清空其余。 */
-const KIND_LABEL = { video: "视频", image: "图片", audio: "音频" };
-const KIND_LIMIT = { video: MAX_VIDEO_MB, image: MAX_IMAGE_MB, audio: MAX_AUDIO_MB };
-const HINT_DEFAULT = {
-  vname: "建议 5-15 秒、10MB 以内(上限 20MB;在线版过大可能被平台拒绝)",
-  iname: "", aname: "",
-};
+/* ---------- 文件选择(5 个 input,互斥) ---------- */
+const KIND_LABEL = { video:"视频", image:"图片", audio:"音频" };
+const KIND_LIMIT = { video:MAX_VIDEO_MB, image:MAX_IMAGE_MB, audio:MAX_AUDIO_MB };
+const HINT_DEFAULT = { vname:"建议 5-15 秒、10MB 以内(上限 20MB;在线版过大可能被平台拒绝)", iname:"", aname:"" };
+const INPUTS = { video:["video","vname","vlabel"], photo:["image","iname","ilabel"],
+  audio:["audio","aname","alabel"], videoCap:["video","vname","vlabel"], photoCap:["image","iname","ilabel"] };
 
-// input id -> [种类, 显示文件名的元素 id]
-const INPUTS = {
-  video:    ["video", "vname"],
-  photo:    ["image", "iname"],
-  audio:    ["audio", "aname"],
-  videoCap: ["video", "vname"],
-  photoCap: ["image", "iname"],
-};
-
-function resetPickers(exceptId) {
-  for (const id of Object.keys(INPUTS)) {
-    if (id === exceptId) continue;
-    const el = $("#" + id);
-    if (el) el.value = "";
+function resetPickers(exceptId){
+  for (const id of Object.keys(INPUTS)){ if (id===exceptId) continue; const el=$("#"+id); if(el) el.value=""; }
+  for (const [nameId,text] of Object.entries(HINT_DEFAULT)){
+    const el=$("#"+nameId); if(!el) continue;
+    const owner=INPUTS[exceptId]; if (owner && owner[1]===nameId) continue;
+    el.textContent=text; el.classList.add("muted");
   }
-  // 文件名提示回到初始态(被选中的那个稍后单独覆盖)
-  for (const [nameId, text] of Object.entries(HINT_DEFAULT)) {
-    const el = $("#" + nameId);
-    if (!el) continue;
-    const owner = INPUTS[exceptId];
-    if (owner && owner[1] === nameId) continue;
-    el.textContent = text;
-    el.classList.add("muted");
-  }
+  ["vlabel","ilabel","alabel"].forEach(id=>{ const o=INPUTS[exceptId]; if(!(o&&o[2]===id)) $("#"+id)?.classList.remove("has"); });
 }
-
-for (const [id, [kind, nameId]] of Object.entries(INPUTS)) {
-  const input = $("#" + id);
-  if (!input) continue;
+for (const [id,[kind,nameId,labelId]] of Object.entries(INPUTS)){
+  const input=$("#"+id); if(!input) continue;
   input.onchange = () => {
-    const f = input.files[0];
-    if (!f) return;
-    const mb = f.size / 1024 / 1024, limitMB = KIND_LIMIT[kind];
-    const nameEl = $("#" + nameId);
-    if (mb > limitMB) {
-      showErr(`这个${KIND_LABEL[kind]} ${mb.toFixed(1)}MB,超过 ${limitMB}MB 上限。` +
-              (kind === "image" ? "请换一张更小的图片。"
-                                : "请先裁剪(建议只保留最关键的 5-15 秒)后再上传。"));
-      input.value = "";
-      nameEl.textContent = HINT_DEFAULT[nameId] || "";
-      nameEl.classList.add("muted");
-      setFile(null, null);
-      return;
+    const f=input.files[0]; if(!f) return;
+    const mb=f.size/1024/1024, limitMB=KIND_LIMIT[kind], nameEl=$("#"+nameId);
+    if (mb>limitMB){
+      showErr(`这个${KIND_LABEL[kind]} ${mb.toFixed(1)}MB,超过 ${limitMB}MB 上限。`+
+        (kind==="image"?"请换一张更小的图片。":"请先裁剪(建议只保留最关键的 5-15 秒)后再上传。"));
+      input.value=""; nameEl.textContent=HINT_DEFAULT[nameId]||""; nameEl.classList.add("muted"); setFile(null,null); return;
     }
-    clearErr();
-    resetPickers(id);
-    nameEl.textContent = `${f.name} · ${mb.toFixed(1)}MB`;
-    nameEl.classList.remove("muted");
-    setFile(f, kind);
+    clearErr(); resetPickers(id);
+    nameEl.textContent=`${f.name} · ${mb.toFixed(1)}MB`; nameEl.classList.remove("muted");
+    $("#"+labelId)?.classList.add("has");
+    setFile(f,kind);
   };
 }
-
-function setFile(f, kind) {
-  file = f; fileKind = kind;
-  const go = $("#go");
-  go.disabled = !f;
+function setFile(f,kind){
+  file=f; fileKind=kind; const go=$("#go");
+  go.disabled=!f;
   go.textContent = !f ? "选择素材后开始判读"
-    : kind === "image" ? "开始判读(快速模式)"
-    : kind === "audio" ? "开始判读(仅声学分析)"
-    : "开始判读";
-  // 抽帧链路只对视频有意义
-  $("#framesmode").parentElement.style.display = kind === "video" ? "" : "none";
+    : kind==="image" ? "开始判读(快速模式)"
+    : kind==="audio" ? "开始判读(仅声学分析)" : "开始判读";
+  $("#framesmode").parentElement.style.display = kind==="video" ? "" : "none";
 }
 function showErr(m){ const e=$("#formerr"); e.textContent=m; e.classList.remove("hide"); }
 function clearErr(){ $("#formerr").classList.add("hide"); }
 
 /* ---------- 提交 ---------- */
 $("#form").onsubmit = async e => {
-  e.preventDefault();
-  if (!file) return;
-
-  const parts = [...picked];
-  const free = $("#ctx").value.trim();
-  if (free) parts.push(free);
-  if (!parts.length) { showErr("请至少选一个场景标签,或写一句场景描述。"); return; }
+  e.preventDefault(); if(!file) return;
+  const parts=[...picked]; const free=$("#ctx").value.trim(); if(free) parts.push(free);
+  if(!parts.length){ showErr("请至少选一个场景标签,或写一句场景描述。"); return; }
   clearErr();
+  const mode = fileKind==="image"?"quick":fileKind==="audio"?"audio":($("#framesmode").checked?"frames":"native");
+  const fd=new FormData();
+  fd.append("file",file); fd.append("species",species);
+  fd.append("context",parts.join("、")); fd.append("mode",mode);
 
-  const mode = fileKind === "image" ? "quick"
-             : fileKind === "audio" ? "audio"
-             : ($("#framesmode").checked ? "frames" : "native");
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("species", species);
-  fd.append("context", parts.join("、"));
-  fd.append("mode", mode);
-
-  $("#go").disabled = true;
-  $("#result").innerHTML = "";
+  $("#go").disabled=true; $("#result").innerHTML="";
   $("#progcard").classList.remove("hide");
-  setProgress(2, "上传中…");
-  const t0 = Date.now();
-  const tick = setInterval(() => {
-    $("#elapsed").textContent = ((Date.now() - t0) / 1000).toFixed(0) + "s";
-  }, 250);
-
-  try {
-    const resp = await fetch("/analyze", { method: "POST", body: fd });
-    if (!resp.ok || !(resp.headers.get("content-type") || "").includes("event-stream")) {
-      let msg = `HTTP ${resp.status}`;
-      try { const j = await resp.json(); msg = j.detail || JSON.stringify(j); } catch (_) {}
+  window.scrollTo({top:0,behavior:"smooth"});
+  setProgress(2,"上传中…");
+  const t0=Date.now();
+  const tick=setInterval(()=>{ $("#elapsed").textContent=((Date.now()-t0)/1000).toFixed(0)+"s"; },250);
+  try{
+    const resp=await fetch("/analyze",{method:"POST",body:fd});
+    if(!resp.ok || !(resp.headers.get("content-type")||"").includes("event-stream")){
+      let msg=`HTTP ${resp.status}`;
+      try{ const j=await resp.json(); msg=j.detail||JSON.stringify(j);}catch(_){}
       throw new Error(msg);
     }
-    await readSSE(resp.body, onEvent);
-  } catch (err) {
+    await readSSE(resp.body,onEvent);
+  }catch(err){
     $("#progcard").classList.add("hide");
-    $("#result").innerHTML = `<div class="card"><div class="err">判读失败:${esc(String(err.message || err))}</div></div>`;
-  } finally {
-    clearInterval(tick);
-    $("#go").disabled = false;
-    loadHistory();
+    $("#result").innerHTML=`<div class="card"><div class="err">判读失败:${esc(String(err.message||err))}</div></div>`;
+  }finally{
+    clearInterval(tick); $("#go").disabled=false; loadHistory();
   }
 };
 
-/* ---------- SSE 读取(fetch 流,不是 EventSource) ---------- */
-async function readSSE(stream, handler) {
-  const reader = stream.getReader(), dec = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let i;
-    while ((i = buf.indexOf("\n\n")) >= 0) {
-      const raw = buf.slice(0, i); buf = buf.slice(i + 2);
-      let ev = "message", data = "";
-      for (const line of raw.split("\n")) {
-        if (line.startsWith("event:")) ev = line.slice(6).trim();
-        else if (line.startsWith("data:")) data += line.slice(5).trim();
+async function readSSE(stream,handler){
+  const reader=stream.getReader(), dec=new TextDecoder(); let buf="";
+  while(true){
+    const {done,value}=await reader.read(); if(done) break;
+    buf+=dec.decode(value,{stream:true}); let i;
+    while((i=buf.indexOf("\n\n"))>=0){
+      const raw=buf.slice(0,i); buf=buf.slice(i+2);
+      let ev="message", data="";
+      for(const line of raw.split("\n")){
+        if(line.startsWith("event:")) ev=line.slice(6).trim();
+        else if(line.startsWith("data:")) data+=line.slice(5).trim();
       }
-      if (data) { try { handler(ev, JSON.parse(data)); } catch (_) {} }
+      if(data){ try{ handler(ev,JSON.parse(data)); }catch(_){} }
     }
   }
 }
-
-function setProgress(p, text) {
-  $("#bar").value = p;
-  if (text) $("#stagetext").textContent = text;
-}
-
-function onEvent(ev, d) {
-  if (ev === "progress") setProgress(d.percent, d.message);
-  else if (ev === "heartbeat") setProgress($("#bar").value, `模型判读中… 已用 ${d.elapsed_s}s`);
-  else if (ev === "error") {
+function setProgress(p,text){ $("#bar").value=p; if(text) $("#stagetext").textContent=text; }
+function onEvent(ev,d){
+  if(ev==="progress") setProgress(d.percent,d.message);
+  else if(ev==="heartbeat") setProgress($("#bar").value,`模型判读中… 已用 ${d.elapsed_s}s`);
+  else if(ev==="error"){
     $("#progcard").classList.add("hide");
-    $("#result").innerHTML =
-      `<div class="card"><div class="err">判读失败:${esc(d.message)}</div>` +
-      (d.raw ? `<pre>${esc(d.raw)}</pre>` : "") + `</div>`;
+    $("#result").innerHTML=`<div class="card"><div class="err">判读失败:${esc(d.message)}</div>`+
+      (d.raw?`<pre>${esc(d.raw)}</pre>`:"")+`</div>`;
   }
-  else if (ev === "done") { $("#progcard").classList.add("hide"); render(d); }
+  else if(ev==="done"){ $("#progcard").classList.add("hide"); render(d); }
 }
 
-/* ---------- 结果渲染:三层 ---------- */
-function render(d) {
-  const r = d.result || {}, m = d.meta || {};
-  const insuf = !!r.insufficient_evidence;
-  const cands = r.candidates || [];
-  const top = cands[0] || null;
+/* ---------- 结果渲染 ---------- */
+const confColor = c => c>=0.7 ? "var(--hi)" : c>=0.55 ? "var(--mid)" : "var(--lo)";
 
-  let head;
-  if (insuf) {
-    head = `<div class="insuf">
-        <b>信息不足,无法判断</b>
-        ${esc(r.insufficient_reason || "可用信号不足以支撑任何结论。")}
-      </div>
-      ${r.suggestion ? `<div><b>怎么补拍</b><div style="margin-top:6px">${esc(r.suggestion)}</div></div>` : ""}`;
-  } else {
-    const conf = top && typeof top.confidence === "number" ? top.confidence : null;
-    head = `<div class="verdict">${esc(r.translation || "(模型未给出翻译)")}</div>`;
-    if (top) {
-      head += `<div class="muted" style="font-size:13px">最可能:${esc(top.label || "")}
-        ${conf !== null ? `· 置信度 ${(conf * 100).toFixed(0)}%` : ""}</div>`;
-      if (conf !== null) head += `<div class="confbar"><i style="width:${(conf * 100).toFixed(0)}%"></i></div>`;
+function render(d){
+  const r=d.result||{}, m=d.meta||{};
+  const insuf=!!r.insufficient_evidence;
+  const cands=r.candidates||[]; const top=cands[0]||null;
+
+  let hero;
+  if(insuf){
+    hero=`<div class="insuf">
+        <div class="ttl">⚠️ 信息不足,无法判断</div>
+        <div class="rsn">${esc(r.insufficient_reason||"可用信号不足以支撑任何结论。")}</div>
+      </div>`;
+    if(r.suggestion) hero+=`<div class="block"><div class="suggest"><div class="bt">怎么补拍</div>${esc(r.suggestion)}</div></div>`;
+  }else{
+    const conf = top && typeof top.confidence==="number" ? top.confidence : null;
+    const pct = conf!=null ? Math.round(conf*100) : null;
+    const ring = pct!=null ? `<div class="ring" data-pct="${pct}" style="--rc:${confColor(conf)}">
+        <div class="hole"><div><span class="val">${pct}%</span><div class="lbl">置信度</div></div></div>
+      </div>` : "";
+    hero=`<div class="heroTop">
+        ${ring}
+        <div class="heroText">
+          <p class="verdict">${esc(r.translation||"(模型未给出翻译)")}</p>
+          ${top?`<div class="toplabel">最可能:<b>${esc(top.label||"")}</b></div>`:""}
+        </div>
+      </div>`;
+    if(cands.length>1){
+      hero+=`<div class="altline">其他候选:${cands.slice(1).map(c=>
+        `<span class="altpill">${esc(c.label)} ${Math.round((c.confidence||0)*100)}%</span>`).join("")}</div>`;
     }
-    if (cands.length > 1) {
-      head += `<div class="muted" style="font-size:13px;margin-top:8px">其他候选:` +
-        cands.slice(1).map(c => `${esc(c.label)} ${(c.confidence * 100).toFixed(0)}%`).join("、") +
-        `</div>`;
-    }
-    if (r.suggestion) {
-      head += `<div style="margin-top:14px"><b>可以做什么</b>
-        <div style="margin-top:6px">${esc(r.suggestion)}</div></div>`;
-    }
+    const cb=consistencyBadge(r); if(cb) hero+=`<div class="block">${cb}</div>`;
+    if(r.suggestion) hero+=`<div class="block"><div class="suggest"><div class="bt">可以做什么</div>${esc(r.suggestion)}</div></div>`;
   }
 
-  const meta = `<div class="meta">
-      ${esc(m.mode)} 模式 · ${esc(m.model || "")} ·
-      ${m.latency_s}s · in ${m.tokens_in ?? "-"} / out ${m.tokens_out ?? "-"} tokens
-      ${m.motion_features ? ` · 运动 ${esc(m.motion_features.motion_intensity || "")}` : ""}
+  const meta=`<div class="meta">
+      <span>${esc(m.mode)} 模式</span><span>${esc(m.model||"")}</span>
+      <span>${m.latency_s}s</span><span>in ${m.tokens_in??"-"} / out ${m.tokens_out??"-"} tok</span>
+      ${m.motion_features&&m.motion_features.motion_intensity&&m.motion_features.motion_intensity!=="不可观测"?`<span>运动 ${esc(m.motion_features.motion_intensity)}</span>`:""}
     </div>`;
 
-  $("#result").innerHTML = `
-    <div class="card">
-      ${head}${meta}
-      ${layer2(r)}
-      ${layer3(r)}
+  $("#result").innerHTML=`
+    <div class="card hero">${hero}${meta}
+      ${layerTimeline(r)}
+      ${layerRaw(r)}
     </div>
-    <div class="card">
-      <h2>实际情况是什么</h2>
-      <div class="muted" style="font-size:13px;margin-bottom:10px">
-        你的判断比模型更可靠。填一句实际发生了什么,用于后续校准。
-      </div>
+    <div class="card fbcard">
+      <h2 class="sec">实际情况是什么</h2>
+      <div class="hint">你的判断比模型更可靠。填一句实际发生了什么,用于后续校准。</div>
       <input type="text" id="fb" placeholder="例:它其实是想出门,不是紧张">
-      <button class="go" id="fbgo" style="margin-top:10px">提交反馈</button>
-      <div id="fbmsg" class="muted" style="font-size:13px;margin-top:8px"></div>
+      <button class="go" id="fbgo" style="margin-top:11px">提交反馈</button>
+      <div id="fbmsg" class="muted" style="font-size:13px;margin-top:9px"></div>
     </div>`;
 
-  $("#fbgo").onclick = async () => {
-    const v = $("#fb").value.trim();
-    if (!v) { $("#fbmsg").textContent = "写点什么再提交吧。"; return; }
-    $("#fbgo").disabled = true;
-    try {
-      const resp = await fetch(`/feedback/${d.record_id}`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ actual_label: v, user_note: "" }),
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      $("#fbmsg").innerHTML = `<span class="ok">已记录,谢谢。</span>`;
-      $("#fb").disabled = true;
-      loadHistory();
-    } catch (e) {
-      $("#fbmsg").textContent = "提交失败:" + e.message;
-      $("#fbgo").disabled = false;
-    }
+  // 触发置信度环动画
+  requestAnimationFrame(()=>{ const rg=$("#result .ring"); if(rg) rg.style.setProperty("--pct", rg.dataset.pct); });
+
+  $("#fbgo").onclick=async()=>{
+    const v=$("#fb").value.trim();
+    if(!v){ $("#fbmsg").textContent="写点什么再提交吧。"; return; }
+    $("#fbgo").disabled=true;
+    try{
+      const resp=await fetch(`/feedback/${d.record_id}`,{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({actual_label:v,user_note:""})});
+      if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      $("#fbmsg").innerHTML=`<span class="ok">✓ 已记录,谢谢。</span>`;
+      $("#fb").disabled=true; loadHistory();
+    }catch(e){ $("#fbmsg").textContent="提交失败:"+e.message; $("#fbgo").disabled=false; }
   };
 }
 
-/* 第二层:时间轴 */
-function layer2(r) {
-  const tl = r.timeline || [];
-  const va = r.visual_signals || [], ae = r.audio_events || [];
-  if (!tl.length && !va.length && !ae.length) return "";
-  const rows = tl.map(t => {
-    const rng = Array.isArray(t.t_range) ? `${t.t_range[0]}s – ${t.t_range[1]}s` : esc(String(t.t_range || ""));
-    const dir = String(t.direction || "");
-    const cls = dir.includes("升级") ? "up" : dir.includes("缓解") ? "down" : "";
-    // 纯音频模式下没有视觉通道,不显示 👁 行,避免看起来像"漏了"
-    const visualRow = va.length === 0 && !t.visual ? ""
-      : `<div class="tlv">👁 ${esc(t.visual || "—")}</div>`;
-    return `<div class="tlrow">
-      <div class="tlt">${esc(rng)}${dir ? `<span class="tag ${cls}">${esc(dir)}</span>` : ""}</div>
+/* 一致性徽章 */
+function consistencyBadge(r){
+  const sc=r.segment_consistency; if(!sc||!sc.agreement) return "";
+  const map={consistent:["一致","consistent","跨时段一致"],mixed:["部分一致","mixed","时段间有分歧"],
+    contradictory:["矛盾","contradictory","时段间冲突"],unassessable:["无法评估","unassessable","单一时间切面"]};
+  const [txt,cls]=map[sc.agreement]||["—","unassessable"];
+  return `<div class="bt">跨时段稳定性</div>
+    <span class="badge ${cls}">${esc(txt)}</span>
+    ${sc.confidence_effect?`<span class="cnote">对置信度:${esc(sc.confidence_effect)}</span>`:""}
+    ${sc.note?`<div class="cnote">${esc(sc.note)}</div>`:""}`;
+}
+
+/* 第二层:时间轴 + 依据 + 反方论证 */
+function layerTimeline(r){
+  const tl=r.timeline||[], va=r.visual_signals||[], ae=r.audio_events||[];
+  const ce=r.counter_evidence, sc=r.segment_consistency;
+  const hasCounter = ce && ((ce.counter_hypotheses||[]).length || ce.note);
+  if(!tl.length && !va.length && !ae.length && !hasCounter) return "";
+
+  const rows=tl.map(t=>{
+    const rng=Array.isArray(t.t_range)?`${t.t_range[0]}s – ${t.t_range[1]}s`:esc(String(t.t_range||""));
+    const dir=String(t.direction||""); const cls=dir.includes("升级")?"up":dir.includes("缓解")?"down":"";
+    const visualRow = va.length===0 && !t.visual ? "" : `<div class="tlv">👁 ${esc(t.visual||"—")}</div>`;
+    return `<div class="tlrow ${cls}">
+      <div class="tlt">${esc(rng)}${dir?`<span class="tag ${cls}">${esc(dir)}</span>`:""}</div>
       ${visualRow}
-      <div class="tla">🔊 ${t.audio ? esc(String(t.audio)) : "无声学事件"}</div>
-      ${t.motion ? `<div class="tla">📈 ${esc(String(t.motion))}</div>` : ""}
+      <div class="tla">🔊 ${t.audio?esc(String(t.audio)):"无声学事件"}</div>
+      ${t.motion?`<div class="tla">📈 ${esc(String(t.motion))}</div>`:""}
     </div>`;
   }).join("");
 
-  const conflicts = (r.conflicts || []).map(c =>
-    `<div class="ev"><b>${esc((c.signals || []).join(" ↔ "))}</b><br>${esc(c.resolution || "")}
-     ${c.resolved === false ? '<span class="tag up">未裁决</span>' : ""}</div>`).join("");
+  const conflicts=(r.conflicts||[]).map(c=>
+    `<div class="ev"><b>${esc((c.signals||[]).join(" ↔ "))}</b><br>${esc(c.resolution||"")}
+     ${c.resolved===false?'<span class="tag up">未裁决</span>':""}</div>`).join("");
 
-  return `<details>
-    <summary>时间轴与信号冲突</summary>
-    <div class="tl">${rows || '<div class="muted">模型未给出时间轴</div>'}</div>
-    <div class="muted" style="font-size:12px;margin-top:12px">
-      视觉记录 ${va.length} 条 · 声学事件 ${ae.length} 条
+  return `<details class="layer">
+    <summary>时间轴 · 依据 · 反方论证<span class="chev">▾</span></summary>
+    <div class="body">
+      <div class="tl">${rows||'<div class="muted" style="font-size:13px">模型未给出时间轴</div>'}</div>
+      <div class="muted" style="font-size:12px;margin-top:10px">视觉记录 ${va.length} 条 · 声学事件 ${ae.length} 条</div>
+      ${conflicts?`<div class="subttl">信号冲突裁决</div>${conflicts}`:""}
+      ${evidenceBlock(r)}
+      ${counterBlock(r)}
     </div>
-    ${conflicts ? `<div style="margin-top:12px"><b style="font-size:13px">冲突裁决</b>${conflicts}</div>` : ""}
-    ${evidence(r)}
   </details>`;
 }
 
-function evidence(r) {
-  const cs = r.candidates || [];
-  if (!cs.length) return "";
-  return `<div style="margin-top:14px"><b style="font-size:13px">判断依据</b>` +
-    cs.map(c => `<div style="margin-top:8px"><b>${esc(c.label)}</b>` +
-      (c.evidence || []).map(e =>
-        `<div class="ev">${esc(e.channel || "")} = ${esc(String(e.observation ?? ""))}
-         <span class="muted">@${esc(String(e.t ?? ""))} · 置信 ${esc(e.signal_confidence || "")}</span></div>`
-      ).join("") + `</div>`).join("") + `</div>`;
+function evidenceBlock(r){
+  const cs=r.candidates||[]; if(!cs.length) return "";
+  return `<div class="subttl">判断依据</div>`+cs.map(c=>
+    `<div style="margin-top:8px"><b>${esc(c.label)}</b> <span class="muted">${Math.round((c.confidence||0)*100)}%</span>`+
+    (c.evidence||[]).map(e=>
+      `<div class="ev">${esc(e.channel||"")} = ${esc(String(e.observation??""))}
+       <span class="muted">@${esc(String(e.t??""))} · 置信 ${esc(e.signal_confidence||"")}</span></div>`).join("")+
+    `</div>`).join("");
+}
+
+function counterBlock(r){
+  const ce=r.counter_evidence; if(!ce) return "";
+  const hyps=ce.counter_hypotheses||[];
+  const presTag=p=>{ const s=String(p||""); return s.includes("是")?'<span class="tag yes">反方信号存在</span>'
+    : s.includes("否")?'<span class="tag no">未见反方信号</span>':'<span class="tag maybe">无法确认</span>'; };
+  const vmap={"成立":"no","减弱":"maybe","存疑":"yes"};
+  let out=`<div class="subttl">反方论证 <span class="muted" style="font-weight:400">— 什么情况下这个判断是错的</span></div>`;
+  if(!hyps.length && ce.note){ out+=`<div class="ev">${esc(ce.note)}</div>`; return out; }
+  out+=hyps.map(h=>`<div class="hyp">
+      <div class="alt">${esc(h.alternative||"")} ${presTag(h.present_in_media)}</div>
+      ${h.would_look_like?`<div class="look">若成立本应出现:${esc(h.would_look_like)}</div>`:""}
+    </div>`).join("");
+  if(ce.verdict) out+=`<div class="cnote" style="margin-top:10px">排除反方后:<span class="tag ${vmap[ce.verdict]||"maybe"}">${esc(ce.verdict)}</span> ${esc(ce.note||"")}</div>`;
+  return out;
 }
 
 /* 第三层:原始 JSON */
-function layer3(r) {
-  return `<details><summary>原始 JSON</summary>
-    <pre>${esc(JSON.stringify(r, null, 2))}</pre></details>`;
+function layerRaw(r){
+  return `<details class="layer"><summary>原始 JSON<span class="chev">▾</span></summary>
+    <div class="body"><pre>${esc(JSON.stringify(r,null,2))}</pre></div></details>`;
 }
 
 /* ---------- 历史 ---------- */
-async function loadHistory() {
-  try {
-    const r = await fetch("/history?limit=20");
-    const d = await r.json();
-    const items = d.items || [];
+async function loadHistory(){
+  try{
+    const r=await fetch("/history?limit=30"); const d=await r.json(); const items=d.items||[];
     $("#histcount").textContent = items.length ? `(${items.length})` : "";
-    if (!items.length) { $("#hist").textContent = "还没有记录。"; return; }
-    $("#hist").innerHTML = items.map(it => {
+    if(!items.length){ $("#hist").textContent="还没有记录。"; return; }
+    $("#hist").innerHTML=items.map(it=>{
       const verdict = it.insufficient_evidence
-        ? `<span style="color:var(--warn-fg)">信息不足</span>`
-        : esc(it.translation || it.predicted_label || "—");
+        ? `<span class="muted">信息不足</span>` : esc(it.translation||it.predicted_label||"—");
+      const pct = it.confidence!=null ? (it.confidence*100).toFixed(0)+"%" : "";
       return `<div class="hist">
-        <div class="h1">
-          <span>${it.species === "cat" ? "🐈" : "🐕"} ${verdict}</span>
-          <span class="muted" style="white-space:nowrap">${
-            it.confidence != null ? (it.confidence * 100).toFixed(0) + "%" : ""}</span>
-        </div>
-        <div class="h2">${esc(it.created_at)} · ${esc(it.mode)} · ${esc(it.context || "")}
-          ${it.last_actual_label ? ` · <span class="ok">实际:${esc(it.last_actual_label)}</span>` : ""}
-        </div>
+        <div class="h1"><span>${it.species==="cat"?"🐈":"🐕"} ${verdict}</span>
+          <span class="hpct muted">${pct}</span></div>
+        <div class="h2">${esc(it.created_at)} · ${esc(it.mode)} · ${esc(it.context||"")}
+          ${it.last_actual_label?` · <span class="ok">实际:${esc(it.last_actual_label)}</span>`:""}</div>
       </div>`;
     }).join("");
-  } catch (e) {
-    $("#hist").textContent = "历史加载失败:" + e.message;
-  }
+  }catch(e){ $("#hist").textContent="历史加载失败:"+e.message; }
 }
+$("#exportbtn").addEventListener("click", e=>{ e.preventDefault(); e.stopPropagation(); window.location.href="/export"; });
 
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g,
-    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
+function esc(s){ return String(s??"").replace(/[&<>"']/g,
+  c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
 loadHistory();
 </script>
