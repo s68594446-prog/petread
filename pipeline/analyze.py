@@ -16,7 +16,7 @@ from . import providers as providers_mod
 
 Progress = Callable[[str, int, str], None]
 
-MODES = ("native", "frames", "quick", "audio")
+MODES = ("native", "frames", "quick", "audio", "text")
 
 # 各模式的进度锚点,用于前端画进度条。模型调用那一段是大头,单独留出区间。
 _STAGE_PLAN = {
@@ -25,6 +25,7 @@ _STAGE_PLAN = {
                ("audio", 38), ("model", 90), ("persist", 100)],
     "quick": [("prepare", 15), ("model", 90), ("persist", 100)],
     "audio": [("prepare", 15), ("model", 90), ("persist", 100)],
+    "text": [("prepare", 15), ("model", 90), ("persist", 100)],
 }
 
 
@@ -41,6 +42,7 @@ def analyze(
     knowledge: dict,
     *,
     max_frames: int = 8,
+    text_description: str = "",
     progress: Progress | None = None,
 ) -> dict:
     """执行一次判读。
@@ -48,15 +50,19 @@ def analyze(
     返回 ``{"result", "usage", "tokens_in", "tokens_out", "latency_s",
     "provider", "model", "motion_features", "mode"}``。
     模型调用失败时 ``result`` 里带 ``error`` 字段,不抛异常。
+
+    ``text_description`` 仅在 ``mode == "text"`` 时使用,此时不需要 ``media_path``。
     """
     report = progress or _noop
     if mode not in MODES:
         raise ValueError(f"mode 必须是 {MODES} 之一,收到 '{mode}'")
 
     started = time.time()
-    report("prepare", 5, "准备媒体…")
+    report("prepare", 5, "准备中…")
 
-    if mode == "quick":
+    if mode == "text":
+        out = _run_text(text_description, species, context, provider, knowledge, report)
+    elif mode == "quick":
         out = _run_quick(media_path, species, context, provider, knowledge, report)
     elif mode == "audio":
         out = _run_audio(media_path, species, context, provider, knowledge, report)
@@ -125,6 +131,22 @@ def _run_quick(media_path, species, context, provider, knowledge, report) -> dic
 
     report("model", 30, "模型判读中…")
     result = provider.call_omni(media_path, "image", prompt)
+    report("model", 90, "模型返回,整理结果…")
+    return _finish(provider, result, motion)
+
+
+def _run_text(text_description, species, context, provider, knowledge, report) -> dict:
+    """纯文字:不走视觉/音频链路,直接把用户描述交给模型做行为学推理。"""
+    motion = {
+        "duration": None, "motion_peaks": [], "motion_intensity": "不可观测",
+        "motion_pattern": "不可观测", "periodicity_hz": None,
+        "_note": "文字描述没有媒体,运动学指标全部不可用。",
+    }
+    prompt = prompts_mod.omni_prompt(species, context, knowledge, motion,
+                                     media_hint=(text_description or "").strip(),
+                                     modality="text")
+    report("model", 30, "根据文字描述推理中…")
+    result = provider.call_text(prompt)      # 无媒体,纯文本调用
     report("model", 90, "模型返回,整理结果…")
     return _finish(provider, result, motion)
 

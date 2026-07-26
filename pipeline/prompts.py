@@ -579,6 +579,12 @@ OMNI_SCHEMA = {
         "verdict": "主判断在排除以上反方后是否仍然成立:成立 | 减弱 | 存疑",
         "note": "一句话总结反方论证的结论",
     },
+    "missing_signals": [
+        {
+            "signal": "描述/素材里缺失但对判读重要的通道名(如 tail、ear_position)",
+            "why_it_helps": "补充这个信号为什么能提高判断可靠性",
+        }
+    ],
     "insufficient_evidence": "true 或 false",
     "insufficient_reason": "为 true 时必填,说明缺什么;否则写 null",
     "translation": "一句话的拟人化表达",
@@ -612,6 +618,7 @@ _STRUCTURALLY_ABSENT = {
         "channels": ["__all_visual__"],
         "note": "纯音频没有任何画面,全部视觉通道都不适用。",
     },
+    "text": {"channels": [], "note": ""},
     "video": {"channels": [], "note": ""},
 }
 
@@ -637,6 +644,28 @@ def _sufficiency_rules(modality: str, knowledge: dict) -> str:
     视频有完整的时间+声音维度,门槛最高;单图与纯音频天然少若干通道,
     沿用同一套门槛会导致"只要不是视频就必然证据不足",那是规则的缺陷而非事实。
     """
+    if modality == "text":
+        return """【文字描述的充分性判据 —— 只基于描述里的客观观察,不套用媒体门槛】
+
+**允许出候选的条件:** 用户描述里包含**至少一项主轴级客观观察** ——
+体态/身体姿势、耳朵位置,或一个明确的可复核行为动作(如"往后退""扑上来""贴着人蹭")。
+满足即正常出候选(低置信度)。
+
+**insufficient_evidence 必须为 true(并引导补充)当:**
+- 描述里只有用户自己的结论(如"它好像不开心""感觉怪怪的""它在闹脾气"),
+  没有任何可映射到编码表的客观形态/动作;
+- 或描述空泛到读不出任何主轴信号;
+- 或所有候选 confidence 都低于 0.5。
+  此时 insufficient_reason 说明"描述里缺少可判读的客观观察",
+  suggestion 具体引导用户补充:耳朵朝向、尾巴位置与动作、身体姿势/重心、有没有发声、
+  当时在做什么、对方(人/动物)在做什么。
+
+**置信度:** 文字模式 confidence **上限 0.65**(文字描述必然有信息损失、且依赖用户观察的
+准确度),仅凭单一主轴观察时落 **0.5–0.6**。在 evidence 里如实写明这是转述而非直接观测。
+
+**客观观察 vs 用户结论:** 只有客观观察能作为判读依据。用户的结论("它很紧张""它生气了")
+记录下来供参考,但**绝不作为**候选的证据,也不得因为用户已经下了结论就顺着给高置信度。"""
+
     if modality == "image":
         never = "\n".join(f"    · {c}" for c in _IMAGE_NEVER_COUNTED)
         return f"""【单图的充分性判据 —— 按下面这一套执行,不要套用视频的门槛】
@@ -700,6 +729,10 @@ def _consistency_block(modality: str) -> str:
   最终候选的 confidence 必须**下调**,并在 note 里说明是哪几段冲突。
 - confidence_effect 里写清楚这次一致性检查最终把置信度往哪个方向调了。
 目的:让置信度反映**跨时间的稳定性**,而不是被某一个瞬间的强烈表情带偏。"""
+    if modality == "text":
+        return """本次是文字描述,没有时间轴,无法做跨时段一致性自检。
+segment_consistency.segments 留空或只放一段,agreement 写 "unassessable",
+note 写"文字描述无时间维度,稳定性无法评估",confidence_effect 写"维持,不因一致性加分"。"""
     label = "单张照片只有一个瞬间" if modality == "image" else "纯音频不分视觉时段"
     return f"""本次是{'单图' if modality == 'image' else '纯音频'},{label},无法做跨时段的一致性自检。
 segment_consistency.segments 只放一段(或留空),agreement 写 "unassessable",
@@ -747,9 +780,25 @@ def omni_prompt(
 
     absent = _STRUCTURALLY_ABSENT.get(modality, _STRUCTURALLY_ABSENT["video"])
     modality_label = {"video": "视频(含音轨)", "image": "单张静态照片",
-                      "audio": "纯音频(无画面)"}.get(modality, modality)
+                      "audio": "纯音频(无画面)",
+                      "text": "文字描述(无媒体)"}.get(modality, modality)
 
-    if modality == "audio":
+    if modality == "text":
+        step1 = f"""════════ 第一步:从文字描述提取视觉信号(填入 visual_signals) ════════
+
+把用户描述里的**客观观察**映射到知识库 signals 编码表:
+{channels}
+- 只映射描述中明确提到的观察;没提到的通道写 "不可观测",并放进 uncertain。
+- 取值尽量落到该通道的 values 列表;描述太笼统对不上具体取值时写 "不可观测"。
+- 所有记录 t 统一写 0(文字没有时间轴)。
+- **严格区分客观观察与用户结论**:
+  · 客观观察 = 可被他人复核的形态/动作,例:"耳朵向后贴""尾巴夹在腿间""压低身体往后退""对着门低吼"。
+    → 映射到编码表,作为判读依据。
+  · 用户结论 = 用户自己的判断,例:"它很紧张""它生气了""它不开心"。
+    → 记下供参考,**绝不作为依据**,更不能因为用户已下结论就顺着给高置信度。
+- **主动指出缺失(填 missing_signals):** 把描述里没覆盖、但对本物种判读重要的通道
+  (尤其主轴的体态、耳位,以及尾巴、发声)列进 missing_signals,并说明补充它为何能提高可靠性。"""
+    elif modality == "audio":
         step1 = """════════ 第一步:视觉信号编码(填入 visual_signals) ════════
 
 本次是纯音频,没有任何画面。**visual_signals 直接输出空数组 `[]`**,不要编造视觉观察。
@@ -771,7 +820,15 @@ timeline 中的 visual 字段一律写 null。这不是信息缺失,是素材类
   这两个是判读主轴,单帧里通常都能读到。其余通道读不到就写 "不可观测",不必勉强,
   也不要因为它们读不到就认为整体证据不足 —— 充分性判据见第五步。''' if modality == "image" else ""}"""
 
-    if modality == "image":
+    if modality == "text":
+        step2 = f"""════════ 第二步:从描述提取声音(填入 audio_events) ════════
+
+如果描述提到叫声 / 呼噜 / 低吼 / 嚎叫等,提取出来并尽量匹配知识库 acoustic 表:
+{patterns}
+- 只依据描述里的声音线索,**不要编造**基频、音节数这类描述没提到的声学细节
+  (没提就写 null 或 "未描述")。
+- 描述没提到任何声音 → audio_events 输出空数组。"""
+    elif modality == "image":
         step2 = """════════ 第二步:声学事件编码(填入 audio_events) ════════
 
 单张照片没有音轨,**audio_events 直接输出空数组 `[]`**。不要编造发声。"""
@@ -789,15 +846,25 @@ timeline 中的 visual 字段一律写 null。这不是信息缺失,是素材类
 - 低频事件(如 purr 的 25-30Hz)可能低于录音与压缩的有效响应下限,未检测到不等于未发生。
 - 无任何目标物种发声时 audio_events 输出空数组,这是合法结果,不要把环境噪声当成发声。"""
 
-    user = f"""【任务】对附带的媒体做一次完整判读:视觉信号编码、声学事件编码、时序对齐、
-规则裁决、给出带依据的状态候选。一次输出全部结果。
+    if modality == "text":
+        task_line = ("【任务】仅根据用户的文字描述做一次完整的行为学判读:把描述里的客观观察"
+                     "映射到编码表,给出带依据的状态候选,并指出描述里缺了哪些关键信号。")
+        media_block = ("【用户的文字描述】(这是本次判读的唯一输入;描述里可能混有用户自己的结论,"
+                       f"按第一步的规则区分对待)\n{media_hint or '(空)'}")
+        situation_label = "【背景情境】(用户额外提供的场景标签/说明,可能不准确)"
+    else:
+        task_line = ("【任务】对附带的媒体做一次完整判读:视觉信号编码、声学事件编码、时序对齐、"
+                     "规则裁决、给出带依据的状态候选。一次输出全部结果。")
+        media_block = f"【本次媒体】\n{media_hint or '见本条消息附带的内容'}"
+        situation_label = "【拍摄情境】(由用户提供,可能不准确;与媒体内容冲突时以媒体为准)"
+
+    user = f"""{task_line}
 
 【本次素材类型】{modality_label}
 
-【本次媒体】
-{media_hint or "见本条消息附带的内容"}
+{media_block}
 
-【拍摄情境】(由用户提供,可能不准确;与媒体内容冲突时以媒体为准)
+{situation_label}
 {context or "（未提供）"}
 
 【运动学指标】由帧差曲线计算得出,可作为动作幅度与节律的旁证:

@@ -181,24 +181,37 @@ def _sse(event: str, data: dict) -> bytes:
 
 @app.post("/analyze")
 async def analyze_endpoint(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),   # text 模式无文件
     species: str = Form(...),
     context: str = Form(""),          # 空值走下面的中文校验,而不是框架的 missing
     mode: str = Form("native"),
     max_frames: int = Form(8),
+    text: str = Form(""),             # text 模式的观察描述
 ):
     species = (species or "").strip().lower()
     mode = (mode or "native").strip().lower()
     context = (context or "").strip()
+    text = (text or "").strip()
 
     if species not in ("dog", "cat"):
         raise HTTPException(422, "species 必须是 dog 或 cat")
     if mode not in analyze_mod.MODES:
         raise HTTPException(422, f"mode 必须是 {analyze_mod.MODES} 之一")
-    if not context:
-        raise HTTPException(422, "context 必填:请描述拍摄场景")
 
-    media_path, size = await _save_upload(file, mode)
+    media_path = ""
+    size = 0
+    if mode == "text":
+        if not text:
+            raise HTTPException(422, "text 模式需要填写你观察到的描述")
+        if len(text) > 4000:
+            raise HTTPException(413, "描述过长,请精简到 4000 字以内")
+    else:
+        if file is None or not (file.filename or "").strip():
+            raise HTTPException(422, "缺少上传文件")
+        if not context:
+            raise HTTPException(422, "context 必填:请描述拍摄场景")
+        media_path, size = await _save_upload(file, mode)
+
     provider = _provider()
     knowledge = load_knowledge(species)
 
@@ -215,12 +228,13 @@ async def analyze_endpoint(
         def work() -> dict:
             return analyze_mod.analyze(
                 media_path, species, context, mode, provider, knowledge,
-                max_frames=max_frames, progress=report,
+                max_frames=max_frames, text_description=text, progress=report,
             )
 
         yield _sse("progress", {
             "stage": "upload", "percent": 3,
-            "message": f"已接收 {size / 1024 / 1024:.1f}MB,开始处理…",
+            "message": ("已收到描述,开始处理…" if mode == "text"
+                        else f"已接收 {size / 1024 / 1024:.1f}MB,开始处理…"),
         })
 
         task = loop.run_in_executor(None, work)
@@ -259,8 +273,13 @@ async def analyze_endpoint(
             return
 
         label, confidence = store.summarize_result(result)
+        # text 模式的观察描述并进 context 一起存,否则校准回顾时看不到用户输入了什么
+        stored_context = context
+        if mode == "text":
+            desc = f"文字描述:{text}"
+            stored_context = f"{context}｜{desc}" if context else desc
         record_id = store.insert_record(
-            species=species, mode=mode, context=context, media_path=media_path,
+            species=species, mode=mode, context=stored_context, media_path=media_path,
             result=result, predicted_label=label, confidence=confidence,
             tokens_in=out.get("tokens_in"), tokens_out=out.get("tokens_out"),
             latency_s=out.get("latency_s"), provider=out.get("provider"),

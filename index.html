@@ -125,6 +125,9 @@
   .badge.unassessable{background:var(--chip);color:var(--muted)}
   .cnote{font-size:13px;color:var(--muted);margin-top:8px}
 
+  .tbanner{background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn-fg);
+    border-radius:11px;padding:9px 13px;font-size:13px;font-weight:600;margin-bottom:16px}
+
   /* insufficient */
   .insuf{background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn-fg);
     border-radius:13px;padding:16px 16px 15px}
@@ -230,31 +233,46 @@
   <textarea id="ctx" rows="2" placeholder="例:客厅,快递员按门铃,它冲到门口"></textarea>
 
   <h2 class="sec" style="margin-top:22px"><span class="step">3</span>素材</h2>
-  <label class="filebtn" id="vlabel">
-    🎥 选一段视频
-    <input type="file" id="video" accept="video/*">
-    <div class="filename muted" id="vname">建议 5-15 秒、10MB 以内(上限 20MB;在线版过大可能被平台拒绝)</div>
-  </label>
-  <label class="filebtn sec" id="ilabel" style="margin-top:10px">
-    📷 选一张照片(快速模式,准确度较低)
-    <input type="file" id="photo" accept="image/*">
-    <div class="filename" id="iname"></div>
-  </label>
-  <label class="filebtn sec" id="alabel" style="margin-top:10px">
-    🔊 只有声音(叫声 / 呼噜,只做声学分析)
-    <input type="file" id="audio" accept="audio/*">
-    <div class="filename" id="aname"></div>
-  </label>
-
-  <div class="row" style="margin-top:12px">
-    <span class="muted" style="font-size:13px">或直接拍摄:</span>
-    <label class="minibtn">📹 录像<input type="file" id="videoCap" accept="video/*" capture="environment"></label>
-    <label class="minibtn">📸 拍照<input type="file" id="photoCap" accept="image/*" capture="environment"></label>
+  <div class="chips" id="srcTabs" role="group" aria-label="素材来源" style="margin-bottom:14px">
+    <button type="button" class="chip" data-src="media" aria-pressed="true">📎 上传素材</button>
+    <button type="button" class="chip" data-src="text" aria-pressed="false">✍️ 文字描述</button>
   </div>
 
-  <div class="row" style="margin-top:14px">
-    <input type="checkbox" id="framesmode" style="width:auto">
-    <label for="framesmode" class="muted" style="font-size:13px;margin:0">用抽帧链路(对比用,更慢更贵)</label>
+  <div id="uploadGroup">
+    <label class="filebtn" id="vlabel">
+      🎥 选一段视频
+      <input type="file" id="video" accept="video/*">
+      <div class="filename muted" id="vname">建议 5-15 秒、10MB 以内(上限 20MB;在线版过大可能被平台拒绝)</div>
+    </label>
+    <label class="filebtn sec" id="ilabel" style="margin-top:10px">
+      📷 选一张照片(快速模式,准确度较低)
+      <input type="file" id="photo" accept="image/*">
+      <div class="filename" id="iname"></div>
+    </label>
+    <label class="filebtn sec" id="alabel" style="margin-top:10px">
+      🔊 只有声音(叫声 / 呼噜,只做声学分析)
+      <input type="file" id="audio" accept="audio/*">
+      <div class="filename" id="aname"></div>
+    </label>
+
+    <div class="row" style="margin-top:12px">
+      <span class="muted" style="font-size:13px">或直接拍摄:</span>
+      <label class="minibtn">📹 录像<input type="file" id="videoCap" accept="video/*" capture="environment"></label>
+      <label class="minibtn">📸 拍照<input type="file" id="photoCap" accept="image/*" capture="environment"></label>
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <input type="checkbox" id="framesmode" style="width:auto">
+      <label for="framesmode" class="muted" style="font-size:13px;margin:0">用抽帧链路(对比用,更慢更贵)</label>
+    </div>
+  </div>
+
+  <div id="textGroup" class="hide">
+    <textarea id="textdesc" rows="5" placeholder="描述你观察到的:比如耳朵位置、尾巴动作、身体姿势、有没有叫、在做什么"></textarea>
+    <div class="filename muted" style="margin-top:8px">
+      来不及拍就用文字。尽量写你<b>看到的动作和姿态</b>(耳朵朝向、尾巴位置、身体重心、有没有发声),
+      而不只是"它好像不高兴"这类判断——越具体,判读越可靠。
+    </div>
   </div>
 
   <div id="formerr" class="err hide"></div>
@@ -286,7 +304,7 @@
 const MAX_VIDEO_MB = 20, MAX_IMAGE_MB = 10, MAX_AUDIO_MB = 15;
 const SCENES = ["吃饭前","见生人","独处","主人回家","看到其他动物","玩耍中"];
 const $ = s => document.querySelector(s);
-let species = "dog", picked = new Set(), file = null, fileKind = null;
+let species = "dog", picked = new Set(), file = null, fileKind = null, srcMode = "media";
 
 /* ---------- 场景 / 物种 ---------- */
 SCENES.forEach(s => {
@@ -304,6 +322,31 @@ $("#species").onclick = e => {
   [...$("#species").children].forEach(c => c.setAttribute("aria-pressed", String(c === b)));
   species = b.dataset.v;
 };
+
+/* ---------- 素材来源:上传 / 文字 ---------- */
+$("#srcTabs").onclick = e => {
+  const b = e.target.closest(".chip"); if (!b) return;
+  srcMode = b.dataset.src;
+  [...$("#srcTabs").children].forEach(c => c.setAttribute("aria-pressed", String(c === b)));
+  const isText = srcMode === "text";
+  $("#uploadGroup").classList.toggle("hide", isText);
+  $("#textGroup").classList.toggle("hide", !isText);
+  clearErr();
+  if (isText){
+    // 切到文字模式:清掉已选文件,按钮状态跟随 textarea
+    file = null; fileKind = null;
+    updateTextGo();
+  } else {
+    setFile(file, fileKind);   // 回到上传模式,恢复按钮状态
+  }
+};
+function updateTextGo(){
+  const has = $("#textdesc").value.trim().length > 0;
+  const go = $("#go");
+  go.disabled = !has;
+  go.textContent = has ? "开始判读(文字描述)" : "写下你观察到的,再开始判读";
+}
+$("#textdesc").addEventListener("input", () => { if (srcMode === "text") updateTextGo(); });
 
 /* ---------- 文件选择(5 个 input,互斥) ---------- */
 const KIND_LABEL = { video:"视频", image:"图片", audio:"音频" };
@@ -350,14 +393,25 @@ function clearErr(){ $("#formerr").classList.add("hide"); }
 
 /* ---------- 提交 ---------- */
 $("#form").onsubmit = async e => {
-  e.preventDefault(); if(!file) return;
+  e.preventDefault();
   const parts=[...picked]; const free=$("#ctx").value.trim(); if(free) parts.push(free);
-  if(!parts.length){ showErr("请至少选一个场景标签,或写一句场景描述。"); return; }
+  const fd=new FormData(); fd.append("species",species);
+  let mode;
+  if(srcMode==="text"){
+    const desc=$("#textdesc").value.trim();
+    if(!desc){ showErr("请先写下你观察到的。"); return; }
+    mode="text";
+    fd.append("text",desc);
+    fd.append("context",parts.join("、"));   // 场景可留空,文字里已含观察
+  }else{
+    if(!file) return;
+    if(!parts.length){ showErr("请至少选一个场景标签,或写一句场景描述。"); return; }
+    mode = fileKind==="image"?"quick":fileKind==="audio"?"audio":($("#framesmode").checked?"frames":"native");
+    fd.append("file",file);
+    fd.append("context",parts.join("、"));
+  }
+  fd.append("mode",mode);
   clearErr();
-  const mode = fileKind==="image"?"quick":fileKind==="audio"?"audio":($("#framesmode").checked?"frames":"native");
-  const fd=new FormData();
-  fd.append("file",file); fd.append("species",species);
-  fd.append("context",parts.join("、")); fd.append("mode",mode);
 
   $("#go").disabled=true; $("#result").innerHTML="";
   $("#progcard").classList.remove("hide");
@@ -444,6 +498,11 @@ function render(d){
     const cb=consistencyBadge(r); if(cb) hero+=`<div class="block">${cb}</div>`;
     if(r.suggestion) hero+=`<div class="block"><div class="suggest"><div class="bt">可以做什么</div>${esc(r.suggestion)}</div></div>`;
   }
+  hero += missingBlock(r);
+
+  // 文字模式:顶部标注可靠度有限
+  const textBanner = m.mode==="text"
+    ? `<div class="tbanner">📝 基于文字描述,可靠度有限 —— 拍视频更准</div>` : "";
 
   const meta=`<div class="meta">
       <span>${esc(m.mode)} 模式</span><span>${esc(m.model||"")}</span>
@@ -452,7 +511,7 @@ function render(d){
     </div>`;
 
   $("#result").innerHTML=`
-    <div class="card hero">${hero}${meta}
+    <div class="card hero">${textBanner}${hero}${meta}
       ${layerTimeline(r)}
       ${layerRaw(r)}
     </div>
@@ -480,6 +539,15 @@ function render(d){
       $("#fb").disabled=true; loadHistory();
     }catch(e){ $("#fbmsg").textContent="提交失败:"+e.message; $("#fbgo").disabled=false; }
   };
+}
+
+/* 缺失信号提示(主要用于文字模式) */
+function missingBlock(r){
+  const ms=r.missing_signals||[]; if(!ms.length) return "";
+  return `<div class="block"><div class="suggest" style="border-style:dashed">
+    <div class="bt">补充这些会更准</div>
+    ${ms.map(x=>`<div style="margin-top:4px">· <b>${esc(x.signal||"")}</b>${x.why_it_helps?` — <span class="muted">${esc(x.why_it_helps)}</span>`:""}</div>`).join("")}
+  </div></div>`;
 }
 
 /* 一致性徽章 */
