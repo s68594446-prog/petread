@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hmac
 import io
 import json
 import os
@@ -187,11 +188,13 @@ async def analyze_endpoint(
     mode: str = Form("native"),
     max_frames: int = Form(8),
     text: str = Form(""),             # text 模式的观察描述
+    client_id: str = Form(""),        # 匿名设备 ID,用于隔离历史
 ):
     species = (species or "").strip().lower()
     mode = (mode or "native").strip().lower()
     context = (context or "").strip()
     text = (text or "").strip()
+    client_id = (client_id or "").strip()[:64]
 
     if species not in ("dog", "cat"):
         raise HTTPException(422, "species 必须是 dog 或 cat")
@@ -283,7 +286,7 @@ async def analyze_endpoint(
             result=result, predicted_label=label, confidence=confidence,
             tokens_in=out.get("tokens_in"), tokens_out=out.get("tokens_out"),
             latency_s=out.get("latency_s"), provider=out.get("provider"),
-            model=out.get("model"),
+            model=out.get("model"), client_id=client_id,
         )
 
         yield _sse("progress", {"stage": "persist", "percent": 100, "message": "完成"})
@@ -317,9 +320,11 @@ async def analyze_endpoint(
 # ---------------------------------------------------------------------------
 
 @app.get("/history")
-def history(limit: int = 30, offset: int = 0) -> JSONResponse:
+def history(client_id: str = "", limit: int = 30, offset: int = 0) -> JSONResponse:
     limit = max(1, min(int(limit), 200))
-    rows = store.list_records(limit=limit, offset=max(0, int(offset)))
+    # 只返回该设备自己的记录;client_id 为空则空列表(不泄漏他人/老数据)
+    rows = store.list_records((client_id or "").strip()[:64],
+                              limit=limit, offset=max(0, int(offset)))
     items = []
     for r in rows:
         result = r.get("result") or {}
@@ -347,6 +352,7 @@ def history(limit: int = 30, offset: int = 0) -> JSONResponse:
 _EXPORT_COLUMNS = [
     ("id", "记录ID"),
     ("created_at", "时间"),
+    ("client_id", "设备ID"),
     ("species", "物种"),
     ("mode", "模式"),
     ("context", "场景"),
@@ -365,8 +371,19 @@ _EXPORT_COLUMNS = [
 
 
 @app.get("/export")
-def export_csv() -> Response:
-    """导出所有 records + feedback 为 CSV,供个体校准回顾。"""
+def export_csv(key: str = "") -> Response:
+    """导出**全部** records + feedback 为 CSV,供跨设备校准回顾。
+
+    不按 client_id 过滤(要看到所有人的数据),但用 EXPORT_KEY 口令保护:
+    URL 带 ?key=<EXPORT_KEY>,与环境变量 EXPORT_KEY 比对。
+    环境变量未设置时直接禁用导出(不留后门)。
+    """
+    expected = os.environ.get("EXPORT_KEY", "").strip()
+    if not expected:
+        raise HTTPException(503, "导出未启用:服务端未配置 EXPORT_KEY 环境变量")
+    if not hmac.compare_digest((key or "").strip(), expected):
+        raise HTTPException(403, "导出口令错误:URL 需带正确的 ?key=<EXPORT_KEY>")
+
     rows = store.iter_export_rows()
     buf = io.StringIO()
     buf.write("﻿")          # UTF-8 BOM,让 Excel 正确识别中文

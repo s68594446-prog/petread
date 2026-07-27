@@ -26,6 +26,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS records (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at      TEXT    NOT NULL,
+    client_id       TEXT    NOT NULL DEFAULT '',
     species         TEXT    NOT NULL,
     mode            TEXT    NOT NULL,
     context         TEXT    NOT NULL DEFAULT '',
@@ -59,10 +60,24 @@ CREATE TABLE IF NOT EXISTS profiles (
 CREATE INDEX IF NOT EXISTS idx_records_created  ON records(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_feedback_record  ON feedback(record_id);
 """
+# 注意:client_id 的索引不放进 SCHEMA。老库 executescript 时该列还不存在
+# (迁移在其后运行),放这里会让 CREATE INDEX 直接报错。改由 _migrate 建。
 
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """给已存在的库补上新列。老库没有 client_id 列时加上,默认空串。
+
+    client_id 为空的旧记录不属于任何设备,/history 不会返回它们。
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(records)")}
+    if "client_id" not in cols:
+        conn.execute("ALTER TABLE records ADD COLUMN client_id TEXT NOT NULL DEFAULT ''")
+    # 列确保存在后再建索引(新老库都走这里)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_records_client ON records(client_id)")
 
 
 def connect(db_path: str | None = None) -> sqlite3.Connection:
@@ -77,6 +92,7 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
 def init_db(db_path: str | None = None) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -97,16 +113,17 @@ def insert_record(
     latency_s: float | None,
     provider: str | None,
     model: str | None,
+    client_id: str = "",
     db_path: str | None = None,
 ) -> int:
     with connect(db_path) as conn:
         cur = conn.execute(
             """INSERT INTO records
-               (created_at, species, mode, context, media_path, result_json,
+               (created_at, client_id, species, mode, context, media_path, result_json,
                 predicted_label, confidence, tokens_in, tokens_out, latency_s,
                 provider, model)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (_now(), species, mode, context, media_path,
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (_now(), client_id or "", species, mode, context, media_path,
              json.dumps(result, ensure_ascii=False),
              predicted_label, confidence, tokens_in, tokens_out, latency_s,
              provider, model),
@@ -120,9 +137,15 @@ def get_record(record_id: int, db_path: str | None = None) -> dict | None:
     return _row_to_record(row) if row else None
 
 
-def list_records(limit: int = 50, offset: int = 0,
+def list_records(client_id: str, limit: int = 50, offset: int = 0,
                  db_path: str | None = None) -> list[dict]:
-    """按时间倒序列出记录,附带该记录的反馈条数与最近一条反馈。"""
+    """按时间倒序列出**指定设备**的记录,附带反馈条数与最近一条反馈。
+
+    ``client_id`` 为空时返回空列表 —— 不返回任何记录,老数据(client_id='')
+    因此不会泄漏给任何设备。
+    """
+    if not client_id:
+        return []
     with connect(db_path) as conn:
         rows = conn.execute(
             """SELECT r.*,
@@ -132,9 +155,10 @@ def list_records(limit: int = 50, offset: int = 0,
                         WHERE f.record_id = r.id ORDER BY f.id DESC LIMIT 1)
                         AS last_actual_label
                  FROM records r
+                WHERE r.client_id = ?
                 ORDER BY r.id DESC
                 LIMIT ? OFFSET ?""",
-            (limit, offset),
+            (client_id, limit, offset),
         ).fetchall()
     return [_row_to_record(r) for r in rows]
 
@@ -177,6 +201,7 @@ def iter_export_rows(db_path: str | None = None) -> list[dict]:
         out.append({
             "id": rec["id"],
             "created_at": rec["created_at"],
+            "client_id": rec.get("client_id") or "",
             "species": rec["species"],
             "mode": rec["mode"],
             "context": rec["context"],

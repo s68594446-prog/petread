@@ -306,6 +306,18 @@ const SCENES = ["吃饭前","见生人","独处","主人回家","看到其他动
 const $ = s => document.querySelector(s);
 let species = "dog", picked = new Set(), file = null, fileKind = null, srcMode = "media";
 
+/* ---------- 匿名设备 ID(隔离历史,不做账户) ---------- */
+const clientId = (() => {
+  let id = null;
+  try { id = localStorage.getItem("petread_client_id"); } catch (_) {}
+  if (!id) {
+    id = (crypto.randomUUID ? crypto.randomUUID()
+      : "cid-" + Date.now() + "-" + Math.random().toString(16).slice(2));
+    try { localStorage.setItem("petread_client_id", id); } catch (_) {}
+  }
+  return id;
+})();
+
 /* ---------- 场景 / 物种 ---------- */
 SCENES.forEach(s => {
   const b = document.createElement("button");
@@ -411,6 +423,7 @@ $("#form").onsubmit = async e => {
     fd.append("context",parts.join("、"));
   }
   fd.append("mode",mode);
+  fd.append("client_id",clientId);
   clearErr();
 
   $("#go").disabled=true; $("#result").innerHTML="";
@@ -632,7 +645,7 @@ function layerRaw(r){
 /* ---------- 历史 ---------- */
 async function loadHistory(){
   try{
-    const r=await fetch("/history?limit=30"); const d=await r.json(); const items=d.items||[];
+    const r=await fetch("/history?limit=30&client_id="+encodeURIComponent(clientId)); const d=await r.json(); const items=d.items||[];
     $("#histcount").textContent = items.length ? `(${items.length})` : "";
     if(!items.length){ $("#hist").textContent="还没有记录。"; return; }
     $("#hist").innerHTML=items.map(it=>{
@@ -648,7 +661,27 @@ async function loadHistory(){
     }).join("");
   }catch(e){ $("#hist").textContent="历史加载失败:"+e.message; }
 }
-$("#exportbtn").addEventListener("click", e=>{ e.preventDefault(); e.stopPropagation(); window.location.href="/export"; });
+/* 导出全量数据(校准用):需要 EXPORT_KEY 口令。口令记在本地,失败则清除重问。 */
+async function doExport(){
+  let key=""; try{ key=localStorage.getItem("petread_export_key")||""; }catch(_){}
+  if(!key){ key=(prompt("导出口令(EXPORT_KEY):")||"").trim(); if(!key) return; }
+  let resp;
+  try{ resp=await fetch("/export?key="+encodeURIComponent(key)); }
+  catch(e){ alert("导出失败:"+e.message); return; }
+  if(!resp.ok){
+    try{ localStorage.removeItem("petread_export_key"); }catch(_){}
+    let msg=`${resp.status}`; try{ msg=(await resp.json()).detail||msg; }catch(_){}
+    alert("导出被拒:"+msg); return;
+  }
+  try{ localStorage.setItem("petread_export_key", key); }catch(_){}
+  const blob=await resp.blob();
+  const cd=resp.headers.get("content-disposition")||"";
+  const name=(cd.match(/filename="?([^"]+)"?/)||[])[1]||"petread_export.csv";
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a"); a.href=url; a.download=name;
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+$("#exportbtn").addEventListener("click", e=>{ e.preventDefault(); e.stopPropagation(); doExport(); });
 
 function esc(s){ return String(s??"").replace(/[&<>"']/g,
   c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }

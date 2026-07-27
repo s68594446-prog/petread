@@ -92,9 +92,17 @@ hostname -I | awk '{print $1}'    # Linux
 
 底部有"实际情况是什么"反馈框,填的内容会存进 `feedback` 表,用于后续校准。
 
-**导出校准数据:** 历史记录默认折叠(它是校准数据来源,不会删)。展开后点"导出 CSV",
-下载全部 records + feedback 的宽表(每条一行,含时间、模式、模型判断、置信度、你的实际反馈、
-是否信息不足等),直接丢进表格软件回顾偏差。也可以直接访问 `GET /export`。
+**按设备隔离历史(不做账户):** 首次访问时前端生成一个随机 `client_id`(UUID)存进
+localStorage,之后 `/analyze`、`/history` 都带上它。`/history` 只返回该设备自己的记录;
+换个浏览器/设备就是另一份历史。没有 `client_id` 的老数据不会显示给任何人。
+
+**导出校准数据(全量,跨设备):** 历史记录默认折叠(它是校准数据来源,不会删)。
+展开后点"导出 CSV",下载 **所有设备** 的 records + feedback 宽表(每条一行,含设备ID、时间、
+模式、模型判断、置信度、你的实际反馈、是否信息不足等),直接丢进表格软件回顾偏差。
+
+导出**不按 client_id 过滤**(要看到全部数据),但用口令保护:`GET /export?key=<EXPORT_KEY>`,
+与环境变量 `EXPORT_KEY` 比对。**`EXPORT_KEY` 未设置时 `/export` 返回 503(禁用),不留后门。**
+前端导出按钮会提示输入口令并记在本地,失败自动清除重问。
 
 **两处判读增强(native / quick 都生效):**
 - **跨时段一致性**:视频会被切成 2–4 段分别判读,各段一致则上调置信度、矛盾则下调,
@@ -179,8 +187,8 @@ hostname -I | awk '{print $1}'    # Linux
 |---|---|---|
 | GET | `/` | 前端页面 |
 | POST | `/analyze` | multipart 上传,返回 SSE 流(进度 + 最终结果) |
-| GET | `/history?limit=30` | 历史记录 |
-| GET | `/export` | 导出所有 records + feedback 为 CSV(校准用) |
+| GET | `/history?client_id=&limit=30` | 该设备的历史记录(无 client_id 返回空) |
+| GET | `/export?key=` | 导出**全部设备**的 records + feedback 为 CSV(需 EXPORT_KEY 口令) |
 | GET | `/record/{id}` | 单条详情(含反馈) |
 | POST | `/feedback/{record_id}` | 用户自评 |
 | GET/POST | `/profiles` | 宠物档案 |
