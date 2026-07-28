@@ -27,7 +27,14 @@
 - 鉴权: API key 只从环境变量 `MIMO_API_KEY` 读,`config.yaml` 里只写变量名。`auth_header: bearer`,遇 401 会自动换成 `api-key: <key>` 形式重试一次并打印生效的那种。
 - 其他参数(经 `extra_body` 并入请求体顶层):`thinking: true`、`fps: 2`(native 模式视频采样帧率)、`media_resolution: default`、`timeout: 300s`、`max_retries: 3`(只对网络错误和 5xx 重试,4xx 不重试)、`confidence_floor: 0.5`。
 
-**后端 FastAPI + 前端单文件 HTML + SQLite 存储。** 前端无框架、内联 CSS/JS。`/analyze` 直接返回 `text/event-stream`(SSE),前端用 fetch + ReadableStream 读进度和最终结果(不用 EventSource,因为它带不了 multipart;代价是没自动重连,一次判读 20–30s,断了重传即可)。
+**后端 FastAPI + 前端单文件 HTML + SQLite 存储。** 前端无框架、内联 CSS/JS。
+
+**判读走"后台任务 + 可重连 SSE"两步(重要,这是最新架构):**
+
+1. `POST /analyze`(multipart)只做校验、存上传、建任务,用 `asyncio.create_task` 在**后台**独立跑判读,**立刻返回 `{"job_id": ...}`**(JSON,不是流)。判读跑完会写库,全程不依赖任何 HTTP 连接是否还开着。
+2. `GET /analyze/stream/{job_id}`(SSE)订阅进度。事件按下标缓存在任务里,连接从下标 0 重放,所以**断线重连、页面重载都能拿同一个 job_id 把进度和最终结果重新取回**。前端用 `EventSource`(它自带断线自动重连)。
+
+> 早期版本是"`POST /analyze` 直接返回 SSE 流,前端 fetch + ReadableStream 读",图省事没拆两步。手机切屏会把页面挂起、掐断连接,结果发不回来、连库都写不成——这个坑现在已修,见第三节。任务存进程内存 `_JOBS`,完成后保留 30 分钟供重连;当前单进程 uvicorn 够用,多副本部署要换外部存储(Redis 等)。
 
 **各文件职责(一句话):**
 
@@ -37,7 +44,7 @@
 | `pipeline/providers.py` | 模型调用层。provider 可切换(openai / deepseek / gemini / mock),模型名全来自 config。含 JSON 解析容错、低置信度候选过滤 `filter_low_confidence`、suggestion 安全护栏 `check_suggestion_safety`、base64 支持探测 `probe_base64_support`。所有公开方法只返回 dict,不抛异常。 |
 | `pipeline/prompts.py` | prompt 模板 + 知识库注入。核心是 `omni_prompt`(全模态单次调用的七步 prompt)。**各模态的充分性判据和置信度上限都在这里的 `_sufficiency_rules`。** |
 | `pipeline/analyze.py` | 判读编排层,把 video/prompts/providers 串起来供服务端调用,只通过 progress 回调汇报进度。各模式的分支入口(`_run_native`/`_run_quick`/`_run_audio`/`_run_text`/`_run_frames`)。 |
-| `app.py` | FastAPI 服务端。上传校验、SSE 推送、历史/反馈/导出/档案接口。 |
+| `app.py` | FastAPI 服务端。后台任务注册表 `_JOBS` + `_run_analysis_job`(判读跑完并写库,独立于连接)、`POST /analyze`(建任务返回 job_id)、`GET /analyze/stream/{job_id}`(可重连 SSE)、上传校验、历史/反馈/导出/档案接口。 |
 | `pipeline/store.py` | SQLite 持久层(标准库 sqlite3,无 ORM)。records / feedback / profiles 三张表 + 迁移 + 导出。 |
 | `knowledge/dog.yaml`、`knowledge/cat.yaml` | 犬/猫行为学编码表(见第七节)。 |
 | `index.html` | 单文件前端。三层结果展示、置信度环、反馈框、历史、导出、client_id 生成。 |
@@ -63,6 +70,8 @@
 **智能抽帧按运动峰值,而非均匀抽。** `video.py` 先算逐帧帧差运动曲线,在曲线上找峰值,每个峰值前后各 ±0.2s 三连拍(pre/peak/post)+ 首尾基线帧,去重后按运动强度截断。目的是抓住瞬时信号(扑咬、僵直、尾巴动作的那一下),均匀抽会正好漏掉。只有曲线方差极低(几乎静止)时才退化为均匀抽帧。视频超过 15s 会先截取运动最密集的 10s 窗口。
 
 **native 模式音轨自动处理,不需要单独拆音轨。** 整段视频直接交给模型,音轨随视频一起进去。只有 `frames` 模式才用 ffmpeg 单独抽 16kHz 单声道 wav。
+
+**判读不能挂在一条 HTTP 连接上——切屏就丢结果的坑。** 早期 `POST /analyze` 直接返回 SSE 流,判读全程跑在这一条连接里。手机切到别的 App / 锁屏时,浏览器会挂起页面、掐断连接:结果发不回来,而且存记录的代码在流的末尾、连接断了根本不执行——**模型照跑照花 token,结果和校准数据全丢**。修正:拆成"后台任务 + 可重连 SSE"(见第二节)。判读用 `asyncio.create_task` 在后台独立跑、跑完就写库,与任何连接的存活无关;前端用 `EventSource` + localStorage 存 `job_id`,断线/重载后 `recoverPendingJob()` 拿 job_id 重连,服务端从事件下标 0 重放,幂等。**原则:任何耗时任务的"完成"和"写库"都不能依赖客户端连接还开着。**
 
 **护栏写过头会系统性压制正常输出——这是踩过最深的坑,修正原则务必记住:**
 
@@ -96,7 +105,8 @@
 - 全模态七步 prompt:视觉编码 → 声学编码 → 时序对齐 → 规则裁决(context_modifiers + conflict_rules)→ 候选与充分性判定 → **跨时段一致性自检** → **强制反方论证**。
 - 后处理护栏:低置信度候选过滤、suggestion 安全检查(否定感知 + 邻近判定)。
 - 前端三层结果展示(翻译+置信度环+稳定性+建议 / 时间轴+冲突+依据+反方 / 原始 JSON)、进度条+已用秒数、反馈框、历史列表、CSV 导出(口令保护)。
-- 接口:`/analyze`(SSE)、`/history`、`/export`、`/record/{id}`、`/feedback/{id}`、`/profiles`、`/healthz`。
+- 接口:`POST /analyze`(建后台任务,返回 job_id)、`GET /analyze/stream/{job_id}`(可重连 SSE 进度)、`/history`、`/export`、`/record/{id}`、`/feedback/{id}`、`/profiles`、`/healthz`。
+- **判读后台化 + 可重连:** 切屏、锁屏、断网、整页重载都不再丢结果;记录一定落库(与连接存活无关)。无头脚本验证过"中途断连→同 job_id 重连→结果照常返回+已写库"。
 - 上传双重校验(前端拦一次 + 后端边写边计字节数):视频 20MB / 图片 10MB / 音频 15MB。
 
 **部署:Railway,Dockerfile 构建。**
