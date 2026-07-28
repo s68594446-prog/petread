@@ -403,7 +403,47 @@ function setFile(f,kind){
 function showErr(m){ const e=$("#formerr"); e.textContent=m; e.classList.remove("hide"); }
 function clearErr(){ $("#formerr").classList.add("hide"); }
 
-/* ---------- 提交 ---------- */
+/* ---------- 提交 / 后台任务订阅 ----------
+   判读在服务器后台独立跑,POST 只拿 job_id;进度用 EventSource 订阅。
+   切屏、锁屏、断网、整页重载都能拿 job_id 重连取回结果——不再"切走就失败"。 */
+let curES=null, curTick=null;
+
+function setPendingJob(jobId,t0){
+  try{ localStorage.setItem("petread_pending_job",JSON.stringify({jobId,t0})); }catch(_){}
+}
+function clearPendingJob(){ try{ localStorage.removeItem("petread_pending_job"); }catch(_){} }
+
+function stopJobUI(){
+  if(curTick){ clearInterval(curTick); curTick=null; }
+  if(curES){ curES.close(); curES=null; }
+  $("#go").disabled=false;
+}
+
+function subscribeJob(jobId,t0){
+  $("#progcard").classList.remove("hide");
+  $("#go").disabled=true;
+  if(curTick) clearInterval(curTick);
+  curTick=setInterval(()=>{ $("#elapsed").textContent=((Date.now()-t0)/1000).toFixed(0)+"s"; },250);
+
+  if(curES) curES.close();
+  const es=new EventSource("/analyze/stream/"+encodeURIComponent(jobId)); curES=es;
+  const pass=name=>e=>{ try{ onEvent(name,JSON.parse(e.data)); }catch(_){} };
+  es.addEventListener("progress",pass("progress"));
+  es.addEventListener("heartbeat",pass("heartbeat"));
+  es.addEventListener("done",e=>{
+    try{ onEvent("done",JSON.parse(e.data)); }catch(_){}
+    clearPendingJob(); stopJobUI(); loadHistory();
+  });
+  es.addEventListener("error",e=>{
+    // 带 data 的是服务端主动发的错误(任务不存在 / 判读失败);无 data 的是网络
+    // 断线,EventSource 会自动重连(重连后从头重放事件,幂等),这里不处理。
+    if(e.data){
+      try{ onEvent("error",JSON.parse(e.data)); }catch(_){}
+      clearPendingJob(); stopJobUI(); loadHistory();
+    }
+  });
+}
+
 $("#form").onsubmit = async e => {
   e.preventDefault();
   const parts=[...picked]; const free=$("#ctx").value.trim(); if(free) parts.push(free);
@@ -431,39 +471,23 @@ $("#form").onsubmit = async e => {
   window.scrollTo({top:0,behavior:"smooth"});
   setProgress(2,"上传中…");
   const t0=Date.now();
-  const tick=setInterval(()=>{ $("#elapsed").textContent=((Date.now()-t0)/1000).toFixed(0)+"s"; },250);
   try{
     const resp=await fetch("/analyze",{method:"POST",body:fd});
-    if(!resp.ok || !(resp.headers.get("content-type")||"").includes("event-stream")){
+    if(!resp.ok){
       let msg=`HTTP ${resp.status}`;
       try{ const j=await resp.json(); msg=j.detail||JSON.stringify(j);}catch(_){}
       throw new Error(msg);
     }
-    await readSSE(resp.body,onEvent);
+    const j=await resp.json();
+    if(!j.job_id) throw new Error("服务端未返回 job_id");
+    setPendingJob(j.job_id,t0);
+    subscribeJob(j.job_id,t0);
   }catch(err){
-    $("#progcard").classList.add("hide");
+    $("#progcard").classList.add("hide"); $("#go").disabled=false;
     $("#result").innerHTML=`<div class="card"><div class="err">判读失败:${esc(String(err.message||err))}</div></div>`;
-  }finally{
-    clearInterval(tick); $("#go").disabled=false; loadHistory();
   }
 };
 
-async function readSSE(stream,handler){
-  const reader=stream.getReader(), dec=new TextDecoder(); let buf="";
-  while(true){
-    const {done,value}=await reader.read(); if(done) break;
-    buf+=dec.decode(value,{stream:true}); let i;
-    while((i=buf.indexOf("\n\n"))>=0){
-      const raw=buf.slice(0,i); buf=buf.slice(i+2);
-      let ev="message", data="";
-      for(const line of raw.split("\n")){
-        if(line.startsWith("event:")) ev=line.slice(6).trim();
-        else if(line.startsWith("data:")) data+=line.slice(5).trim();
-      }
-      if(data){ try{ handler(ev,JSON.parse(data)); }catch(_){} }
-    }
-  }
-}
 function setProgress(p,text){ $("#bar").value=p; if(text) $("#stagetext").textContent=text; }
 function onEvent(ev,d){
   if(ev==="progress") setProgress(d.percent,d.message);
@@ -687,6 +711,21 @@ function esc(s){ return String(s??"").replace(/[&<>"']/g,
   c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
 loadHistory();
+
+/* 页面加载/切回时,若上次判读还没出结果(切屏、锁屏、重载中断),用 job_id 重连取回。
+   任务后台仍在跑或已存好,重连就能拿到进度和最终结果;超过保留期就放弃。 */
+(function recoverPendingJob(){
+  let p=null;
+  try{ p=JSON.parse(localStorage.getItem("petread_pending_job")||"null"); }catch(_){}
+  if(p&&p.jobId){
+    if(Date.now()-(p.t0||0) < 30*60*1000){
+      $("#result").innerHTML="";
+      subscribeJob(p.jobId, p.t0||Date.now());
+    }else{
+      clearPendingJob();
+    }
+  }
+})();
 </script>
 </body>
 </html>

@@ -180,6 +180,122 @@ def _sse(event: str, data: dict) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
 
 
+# ---------------------------------------------------------------------------
+# 后台任务:把"跑判读"和"看结果"解耦
+#
+# 一次判读要 20-30s。旧实现把整段判读挂在 POST /analyze 这一条 SSE 连接上,
+# 手机切到别的 App / 锁屏时浏览器会挂起页面、掐断连接,结果就发不回来——而且
+# 存记录的代码在连接后面,连库都写不成(模型照跑照花 token,结果全丢)。
+#
+# 现在改成:POST 只建任务、在后台独立把判读跑完并写库,立刻返回 job_id;
+# 前端用 GET /analyze/stream/{job_id} 订阅进度。切屏、断网、甚至整页重载,
+# 都能拿 job_id 重新连上取回结果——后台任务不依赖任何一条连接是否还开着。
+#
+# 任务存在进程内存(_JOBS)。当前是单进程 uvicorn,够用;将来多副本部署时
+# 需换成 Redis 之类的外部存储。
+# ---------------------------------------------------------------------------
+
+JOB_TTL_S = 1800          # 任务完成后在内存里保留 30 分钟,供重连 / 重载取回
+_JOBS: dict[str, dict] = {}
+
+
+def _sweep_jobs() -> None:
+    now = time.time()
+    stale = [jid for jid, j in _JOBS.items()
+             if j.get("finished_at") and now - j["finished_at"] > JOB_TTL_S]
+    for jid in stale:
+        _JOBS.pop(jid, None)
+
+
+def _new_job() -> tuple[str, dict]:
+    _sweep_jobs()
+    jid = uuid.uuid4().hex
+    job = {"events": [], "done": False, "created": time.time(), "finished_at": None}
+    _JOBS[jid] = job
+    return jid, job
+
+
+def _job_emit(job: dict, event: str, payload: dict) -> None:
+    """追加一个事件。所有订阅者(含之后才连上的)都按下标从头补看到它。"""
+    job["events"].append((event, payload))
+
+
+def _job_finish(job: dict, event: str, payload: dict) -> None:
+    _job_emit(job, event, payload)
+    job["done"] = True
+    job["finished_at"] = time.time()
+
+
+async def _run_analysis_job(
+    job: dict, *, media_path: str, size: int, species: str, context: str,
+    mode: str, provider, knowledge: dict, max_frames: int, text: str, client_id: str,
+) -> None:
+    """后台判读:跑模型 -> 写库 -> 落最终事件。全程不依赖任何 HTTP 连接。"""
+    loop = asyncio.get_running_loop()
+
+    def report(stage: str, pct: int, message: str) -> None:
+        loop.call_soon_threadsafe(
+            _job_emit, job, "progress",
+            {"stage": stage, "percent": pct, "message": message})
+
+    def work() -> dict:
+        return analyze_mod.analyze(
+            media_path, species, context, mode, provider, knowledge,
+            max_frames=max_frames, text_description=text, progress=report)
+
+    _job_emit(job, "progress", {
+        "stage": "upload", "percent": 3,
+        "message": ("已收到描述,开始处理…" if mode == "text"
+                    else f"已接收 {size / 1024 / 1024:.1f}MB,开始处理…")})
+
+    try:
+        out = await loop.run_in_executor(None, work)
+    except Exception as exc:                       # 判读层不该抛,兜住以免任务卡在未完成
+        _job_finish(job, "error", {"message": f"{type(exc).__name__}: {exc}"})
+        return
+
+    result = out.get("result") or {}
+    if "error" in result:
+        _job_finish(job, "error", {
+            "message": result["error"], "raw": str(result.get("raw", ""))[:2000]})
+        return
+
+    label, confidence = store.summarize_result(result)
+    # text 模式的观察描述并进 context 一起存,否则校准回顾时看不到用户输入了什么
+    stored_context = context
+    if mode == "text":
+        desc = f"文字描述:{text}"
+        stored_context = f"{context}｜{desc}" if context else desc
+    try:
+        record_id = store.insert_record(
+            species=species, mode=mode, context=stored_context, media_path=media_path,
+            result=result, predicted_label=label, confidence=confidence,
+            tokens_in=out.get("tokens_in"), tokens_out=out.get("tokens_out"),
+            latency_s=out.get("latency_s"), provider=out.get("provider"),
+            model=out.get("model"), client_id=client_id)
+    except Exception as exc:
+        _job_finish(job, "error", {"message": f"写库失败 {type(exc).__name__}: {exc}"})
+        return
+
+    _job_emit(job, "progress", {"stage": "persist", "percent": 100, "message": "完成"})
+    _job_finish(job, "done", {
+        "record_id": record_id,
+        "result": result,
+        "meta": {
+            "mode": mode,
+            "species": species,
+            "tokens_in": out.get("tokens_in"),
+            "tokens_out": out.get("tokens_out"),
+            "latency_s": out.get("latency_s"),
+            "provider": out.get("provider"),
+            "model": out.get("model"),
+            "motion_features": out.get("motion_features"),
+            "predicted_label": label,
+            "confidence": confidence,
+        },
+    })
+
+
 @app.post("/analyze")
 async def analyze_endpoint(
     file: UploadFile | None = File(None),   # text 模式无文件
@@ -189,7 +305,8 @@ async def analyze_endpoint(
     max_frames: int = Form(8),
     text: str = Form(""),             # text 模式的观察描述
     client_id: str = Form(""),        # 匿名设备 ID,用于隔离历史
-):
+) -> JSONResponse:
+    """建任务并在后台启动判读,立刻返回 job_id。进度用 GET /analyze/stream 订阅。"""
     species = (species or "").strip().lower()
     mode = (mode or "native").strip().lower()
     context = (context or "").strip()
@@ -218,97 +335,45 @@ async def analyze_endpoint(
     provider = _provider()
     knowledge = load_knowledge(species)
 
-    async def stream():
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
+    job_id, job = _new_job()
+    # create_task 后台跑,不 await;请求这就返回。任务生命周期与本请求无关。
+    asyncio.create_task(_run_analysis_job(
+        job, media_path=media_path, size=size, species=species, context=context,
+        mode=mode, provider=provider, knowledge=knowledge, max_frames=max_frames,
+        text=text, client_id=client_id))
+    return JSONResponse({"job_id": job_id})
 
-        def report(stage: str, pct: int, message: str) -> None:
-            loop.call_soon_threadsafe(
-                queue.put_nowait,
-                ("progress", {"stage": stage, "percent": pct, "message": message}),
-            )
 
-        def work() -> dict:
-            return analyze_mod.analyze(
-                media_path, species, context, mode, provider, knowledge,
-                max_frames=max_frames, text_description=text, progress=report,
-            )
+@app.get("/analyze/stream/{job_id}")
+async def analyze_stream(job_id: str) -> StreamingResponse:
+    """订阅某个任务的进度(SSE)。从头补发已缓冲的事件,因此断线重连 / 页面重载
+    都能拿同一个 job_id 把进度和最终结果重新取回。EventSource(GET)即可用。"""
 
-        yield _sse("progress", {
-            "stage": "upload", "percent": 3,
-            "message": ("已收到描述,开始处理…" if mode == "text"
-                        else f"已接收 {size / 1024 / 1024:.1f}MB,开始处理…"),
-        })
+    async def gen():
+        job = _JOBS.get(job_id)
+        if job is None:
+            # 任务不存在或已过期:发一个错误事件让前端停下,别让 EventSource 空转重连
+            yield _sse("error", {"message": "任务不存在或已过期,请重新提交。"})
+            return
 
-        task = loop.run_in_executor(None, work)
-        started = time.time()
-
-        # 模型那一段是 20-30 秒的阻塞调用,期间没有真实进度可推。
-        # 每秒发一次心跳带上已用秒数,前端才不会看起来卡死。
+        idx = 0
         while True:
-            try:
-                event, payload = await asyncio.wait_for(queue.get(), timeout=1.0)
+            # 补发这条连接还没看到的事件(重连时会从 0 开始重放,天然幂等)
+            while idx < len(job["events"]):
+                event, payload = job["events"][idx]
+                idx += 1
                 yield _sse(event, payload)
-            except asyncio.TimeoutError:
-                if task.done():
-                    break
-                yield _sse("heartbeat", {"elapsed_s": round(time.time() - started, 1)})
-                continue
-            if task.done() and queue.empty():
-                break
-
-        try:
-            out = await task
-        except Exception as exc:                       # 判读层不该抛,兜住以免连接挂死
-            yield _sse("error", {"message": f"{type(exc).__name__}: {exc}"})
-            return
-
-        while not queue.empty():
-            event, payload = queue.get_nowait()
-            yield _sse(event, payload)
-
-        result = out.get("result") or {}
-        if "error" in result:
-            yield _sse("error", {
-                "message": result["error"],
-                "raw": str(result.get("raw", ""))[:2000],
-            })
-            return
-
-        label, confidence = store.summarize_result(result)
-        # text 模式的观察描述并进 context 一起存,否则校准回顾时看不到用户输入了什么
-        stored_context = context
-        if mode == "text":
-            desc = f"文字描述:{text}"
-            stored_context = f"{context}｜{desc}" if context else desc
-        record_id = store.insert_record(
-            species=species, mode=mode, context=stored_context, media_path=media_path,
-            result=result, predicted_label=label, confidence=confidence,
-            tokens_in=out.get("tokens_in"), tokens_out=out.get("tokens_out"),
-            latency_s=out.get("latency_s"), provider=out.get("provider"),
-            model=out.get("model"), client_id=client_id,
-        )
-
-        yield _sse("progress", {"stage": "persist", "percent": 100, "message": "完成"})
-        yield _sse("done", {
-            "record_id": record_id,
-            "result": result,
-            "meta": {
-                "mode": mode,
-                "species": species,
-                "tokens_in": out.get("tokens_in"),
-                "tokens_out": out.get("tokens_out"),
-                "latency_s": out.get("latency_s"),
-                "provider": out.get("provider"),
-                "model": out.get("model"),
-                "motion_features": out.get("motion_features"),
-                "predicted_label": label,
-                "confidence": confidence,
-            },
-        })
+                if event in ("done", "error"):
+                    return
+            if job["done"]:
+                return
+            # 空闲时每秒一次心跳,带上从任务创建起算的已用秒数(重连也连续)
+            await asyncio.sleep(1.0)
+            yield _sse("heartbeat",
+                       {"elapsed_s": round(time.time() - job["created"], 1)})
 
     return StreamingResponse(
-        stream(),
+        gen(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                  "Connection": "keep-alive"},
