@@ -127,8 +127,57 @@ def _hard_constraints(knowledge: dict) -> str:
     return f"【硬约束】(来自知识库 meta.hard_constraints)\n{lines}"
 
 
-def build_system_prompt(species: str, knowledge: dict, task: str) -> str:
-    """三段共用的 system prompt:角色 + 知识库全量 + 约束 + 输出格式。"""
+# ---------------------------------------------------------------------------
+# 按模态裁剪知识库
+#
+# 整个知识库 dump 进 system prompt 每物种约 1.5 万字符,加上 pain_indicators /
+# temporal_signals 后继续膨胀,直接推高延迟与成本。用不上的分块按模态剔掉:
+# 单图没有音轨,纯音频没有画面,非视频读不到时序信号。
+# ---------------------------------------------------------------------------
+
+# 任何模态都不得剔除:判读框架、输出约束、裁决规则与素材类型无关,
+# behavior_patterns 更是文字/图片模式能出候选的关键入口。
+_ALWAYS_KEEP = ("meta", "output_constraints", "conflict_rules",
+                "context_modifiers", "behavior_patterns")
+
+# 各模态要剔除的顶层键。
+_PRUNE_BY_MODALITY: dict[str, tuple[str, ...]] = {
+    "image": ("acoustic", "temporal_signals"),      # 单图无音轨、无时间轴
+    "audio": ("signals", "temporal_signals"),       # 纯音频无画面
+    "text": ("temporal_signals",),                  # 文字无时间轴
+    "video": (),                                    # 视频全保留
+}
+
+# 纯音频模式下 pain_indicators 里仍然保留的键:全部动作单元与面部线索都依赖画面,
+# 但"这是提示不是诊断"的边界约束与"犬类无已验证量表"的说明必须留着。
+_PAIN_KEEP_FOR_AUDIO = ("scale_name", "evidence_level", "hard_boundary",
+                        "no_validated_scale", "what_this_measures")
+
+
+def prune_knowledge(knowledge: dict, modality: str = "video") -> dict:
+    """按模态裁掉用不上的知识库分块,返回**新** dict(不修改传入对象)。
+
+    ``load_knowledge`` 的结果是进程内缓存的共享对象,这里绝不能就地改。
+    未知 modality 一律按 video 处理(全量保留),宁可长也不要漏掉判读依据。
+    """
+    drop = set(_PRUNE_BY_MODALITY.get(modality, ()))
+    pruned = {k: v for k, v in knowledge.items()
+              if k in _ALWAYS_KEEP or k not in drop}
+
+    pain = pruned.get("pain_indicators")
+    if modality == "audio" and isinstance(pain, dict):
+        pruned["pain_indicators"] = {k: v for k, v in pain.items()
+                                     if k in _PAIN_KEEP_FOR_AUDIO}
+    return pruned
+
+
+def build_system_prompt(species: str, knowledge: dict, task: str,
+                        modality: str = "video") -> str:
+    """三段共用的 system prompt:角色 + 知识库(按模态裁剪)+ 约束 + 输出格式。
+
+    ``modality`` 默认 "video"(全量保留),保证 vision/audio/fusion 三个旧入口
+    的行为不变;只有 omni_prompt 会按实际素材类型传值。
+    """
     meta = knowledge.get("meta") or {}
     framework = meta.get("framework", "")
     role = {
@@ -142,9 +191,10 @@ def build_system_prompt(species: str, knowledge: dict, task: str) -> str:
         f"物种: {species}    判读框架: {framework}",
         "",
         "【知识库】以下 YAML 是本次判读的唯一依据。不得引入知识库之外的行为学主张,"
-        "不得编造文献、作者或年份。",
+        "不得编造文献、作者或年份。带 source 字段的条目,其 DOI 只能原样引用,"
+        "不得改写、不得为没有 source 的条目补一个出处。",
         "```yaml",
-        _dump_yaml(knowledge),
+        _dump_yaml(prune_knowledge(knowledge, modality)),
         "```",
         "",
         CONFIDENCE_LEGEND,
@@ -638,6 +688,99 @@ _IMAGE_NEVER_COUNTED = [
 ]
 
 
+def _pain_block(modality: str, knowledge: dict) -> str:
+    """疼痛面部指标在各模态下的读法。按物种分叉:猫有已验证量表(FGS),犬没有。
+
+    两边的输出边界一致 —— 只提示、不诊断。差别在于犬侧连"评分"这一步都不允许。
+    """
+    pain = knowledge.get("pain_indicators") or {}
+    if not pain:
+        return ""
+
+    # 猫:FGS 有 action_units,且经效度验证;犬:没有等效量表,只有恐惧研究的面部线索。
+    has_scale = bool(pain.get("action_units"))
+
+    if not has_scale:
+        return """**疼痛/不适线索(本物种【没有】已验证的面部疼痛量表):**
+知识库 pain_indicators 收录的面部线索(耳根后拉、张口增多)来自**恐惧研究而非疼痛研究**,
+且本物种不存在等效于 Feline Grimace Scale 的已验证量表。因此:
+- 这些线索**只能**按"恐惧 / 负性唤醒"解读,与 signals 的防御性判读相互印证;
+- **禁止**据此评分、设阈值,或套用其他物种的 cut-off;
+- **禁止**输出任何疼痛结论。仅当出现躯体性迹象(运动受限、定点舔舐、姿势异常、触碰躲避)
+  且已排除体温调节与品种结构因素时,才按 pain_indicators.hard_boundary 的措辞提示
+  『建议由执业兽医评估』,并且只描述观察到的形态,不做归因。"""
+
+    if modality == "text":
+        return """**疼痛面部指标(FGS)在文字模式下的读法:**
+用户若描述了面部特征(耳朵扁平外旋、眯眼、胡须前伸变直、低头/下颏收向胸部),
+可以把它们映射到 pain_indicators 的对应动作单元。但:
+- confidence **上限仍是 0.65,不得因命中 FGS 而上调** —— 静态图片与实时观察的等效性
+  (source 10.7717/peerj.8967)只适用于**直接看到画面**的情形,不适用于主人转述;
+- evidence 里**必须写明"依据主人转述,非直接观测"**;
+- **只有命中 ≥3 个动作单元**时,才允许提示"可能存在不适,建议由执业兽医评估";
+  命中 1–2 个时只作佐证,不得提示疼痛;
+- ⚠️ 输出边界:只能写『观察到符合疼痛的面部特征,建议由执业兽医评估』,
+  **禁止**断言疼痛(如"你的猫在痛")、推测病因或给出用药建议。"""
+
+    if modality == "image":
+        return """**(d) 疼痛面部指标(FGS)—— 单图模式下【不因静态素材而降级】:**
+pain_indicators 是本知识库中少见的**高证据等级**通道。画面能读到其中多个动作单元
+(耳位、眼眶紧缩、口鼻紧张度、胡须变化、头部位置)时即可据此出候选:
+- 依据 pain_indicators.static_image_validity:静态图片评分与实时观察几乎等效
+  (偏差 -0.057,一致性区间 -0.351 至 0.237),**因此 FGS 相关判读不因"只有一张照片"
+  而降级** —— 这是单图模式中少数不受静态局限影响的通道;
+- 可观测的动作单元计入上面 (b) 的可观测通道总数;
+- 达到 pain_indicators.threshold 时应给出就医提示;
+- ⚠️ 输出边界:只能写『观察到符合疼痛的面部特征,建议由执业兽医评估』,
+  **禁止**断言疼痛、推测病因或给用药建议;
+- ⚠️ **不要与 signals 的同名通道混用**(见 conflict_rules 中 FGS 那一条):
+  同一处观察不得在两套体系里各记一次当作两条独立证据。"""
+
+    return """**疼痛面部指标(FGS):**
+可读到多个动作单元时按 pain_indicators 评估,达到 threshold 应给出就医提示。
+⚠️ 只能写『观察到符合疼痛的面部特征,建议由执业兽医评估』,禁止断言疼痛、推测病因
+或给用药建议;不要与 signals 的同名通道混用(见 conflict_rules)。"""
+
+
+def _pain_read_instruction(modality: str, knowledge: dict) -> str:
+    """第一步里"顺带把疼痛面部指标读了"的指令。只对有画面的模态生成。"""
+    pain = knowledge.get("pain_indicators") or {}
+    if not pain or modality not in ("image", "video"):
+        return ""
+
+    if pain.get("action_units"):
+        units = [u.get("unit") for u in pain["action_units"]]
+        return f"""
+- **同时读疼痛面部指标(pain_indicators):** 逐个评估 {units} 这 5 个动作单元,
+  各记 0 / 1 / 2 分,读不到的记"不可观测"(**不要猜分**)。这是知识库中少见的
+  **高证据等级**通道,且静态图片评分与实时观察几乎等效,单图同样适用。
+  ⚠️ 与 signals 的同名通道(ear_position / whisker_position)读的**不是同一件事**:
+  那边读唤醒与防御意图,这边读疼痛。分别编码,**不得**互相替代填值,也不得把同一处
+  观察在两边各记一次当作两条独立证据(裁决见 conflict_rules)。
+  ⚠️ 结论边界:达到阈值时只能写『观察到符合疼痛的面部特征,建议由执业兽医评估』,
+  **禁止**断言疼痛、推测病因或给用药建议。"""
+
+    return """
+- **同时留意疼痛/不适线索(pain_indicators):** 本物种**没有**已验证的面部疼痛量表,
+  该节收录的线索(耳根后拉、张口增多)来自**恐惧研究而非疼痛研究**。
+  因此只按"恐惧 / 负性唤醒"记录,**禁止**评分、设阈值或输出疼痛结论;
+  出现躯体性迹象且已排除体温调节与品种结构因素时,才按 hard_boundary 的措辞提示就医。"""
+
+
+def _temporal_read_instruction(modality: str, knowledge: dict) -> str:
+    """第一步里读 temporal_signals 的指令。只有 video 有连续画面,其余模态一律不生成。"""
+    temporal = knowledge.get("temporal_signals") or {}
+    if not temporal or modality != "video":
+        return ""
+    names = [c.get("channel") for c in (temporal.get("channels") or [])]
+    return f"""
+- **同时读时序信号(temporal_signals):** {names}。
+  这一层**只有视频读得到** —— 它读的是**随时间的变化方向**(升级 / 缓解),
+  不是某一帧的取值。逐条评估,读不到的写 "不可判定"(不影响充分性判定)。
+  ⚠️ 带 limitation 字段的通道必须在 evidence 里如实写明该限制,
+  confidence 不得超过该通道自带的 confidence / confidence_cap。"""
+
+
 def _sufficiency_rules(modality: str, knowledge: dict) -> str:
     """按模态生成"证据是否充分"的判定规则。
 
@@ -681,7 +824,9 @@ def _sufficiency_rules(modality: str, knowledge: dict) -> str:
 准确度),仅凭单一主轴观察时落 **0.5–0.6**。在 evidence 里如实写明这是转述而非直接观测。
 
 **客观观察 vs 用户结论:** 只有客观观察能作为判读依据。用户的结论("它很紧张""它生气了")
-记录下来供参考,但**绝不作为**候选的证据,也不得因为用户已经下了结论就顺着给高置信度。"""
+记录下来供参考,但**绝不作为**候选的证据,也不得因为用户已经下了结论就顺着给高置信度。
+
+""" + _pain_block(modality, knowledge)
 
     if modality == "image":
         never = "\n".join(f"    · {c}" for c in _IMAGE_NEVER_COUNTED)
@@ -709,6 +854,8 @@ def _sufficiency_rules(modality: str, knowledge: dict) -> str:
   原子信号 —— 那是**降低置信度并写进 missing_signals** 的理由,不是拒绝判读的理由。
 - 注意单帧局限:静态画面可能无法确认动作的完整序列(如是否真有后腿踢、是否有摆尾蓄力),
   不确定时应在 evidence 中写明,并让候选保持并列。
+
+{_pain_block(modality, knowledge)}
 
 **永不计入分母的通道**(读不到是素材类型使然,不是证据不足):
 {never}
@@ -747,7 +894,18 @@ def _sufficiency_rules(modality: str, knowledge: dict) -> str:
 - 可观测通道少于 3 个;
 - 知识库 meta.reading_order 中作为判读主轴的通道不可观测;
 - conflicts 中存在 resolved=false 且该冲突涉及判读主轴;
-- 所有候选的 confidence 都低于 0.5。"""
+- 所有候选的 confidence 都低于 0.5。
+
+【时序信号层(temporal_signals)—— 只有本模态可用】
+视频是唯一能读到 temporal_signals 的素材类型,务必用上这一层:
+- 逐条检查 temporal_signals.channels,读**随时间的变化方向**(升级 / 缓解),
+  而不是某一帧的取值 —— 单图读不到的正是这个维度;
+- 每条通道的 confidence 不得超过其自带的 confidence / confidence_cap;
+- 带 limitation 字段的通道(如摆尾左右不对称)**必须**在 evidence 里如实写明该限制,
+  不得把"观察者反应"的证据说成"摆尾个体内在状态"的直接测量;
+- 读不到的通道写 "不可判定" 即可,**不影响**上面的充分性判定,不计入分母。
+
+""" + _pain_block(modality, knowledge)
 
 
 def _consistency_block(modality: str) -> str:
@@ -795,7 +953,7 @@ def omni_prompt(
     system = (
         mimo_system_preamble(now)
         + "\n\n"
-        + build_system_prompt(species, knowledge, "fusion")
+        + build_system_prompt(species, knowledge, "fusion", modality=modality)
     )
 
     channels = list((knowledge.get("signals") or {}).keys())
@@ -864,7 +1022,8 @@ timeline 中的 visual 字段一律写 null。这不是信息缺失,是素材类
   直接找不到落点 —— 这时**不要**因为通道对不上就全标 "不可观测"。
   命中某个 pattern 时:按其 candidates **并列**给出低置信度候选(confidence 取该 pattern 的
   confidence_cap 与单图上限 0.75 中的较小值),并把其 distinguishing_signals 指向的通道
-  逐条列进 missing_signals。命中 pattern 即已具备判读基础,**不得**据此判证据不足。''' if modality == "image" else ""}"""
+  逐条列进 missing_signals。命中 pattern 即已具备判读基础,**不得**据此判证据不足。''' if modality == "image" else ""}
+{_pain_read_instruction(modality, knowledge)}{_temporal_read_instruction(modality, knowledge)}"""
 
     if modality == "text":
         step2 = f"""════════ 第二步:从描述提取声音(填入 audio_events) ════════

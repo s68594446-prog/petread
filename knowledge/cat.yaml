@@ -370,6 +370,125 @@ behavior_patterns:
     notes: "僵住是升级阶梯上的关键转折点,误读为'安静下来了/乖了'是常见且高风险的错误;此时应移除压力源并恢复撤离路径,而不是继续接近。"
 
 # ---------------------------------------------------------------------------
+# 疼痛面部指标:Feline Grimace Scale(FGS)
+#
+# 这是本知识库中少见的【高证据等级】通道:grimace 类量表的系统综述在 9 物种 12 套量表中
+# 把 Feline Grimace Scale 与 Mouse / Rat / Horse Grimace Scale 一并列为高证据等级。
+#
+# ⚠️ 与 signals 的分工(务必分清,不要混用):
+#   signals.ear_position / whisker_position 读的是【唤醒与防御意图】;
+#   本层的同名动作单元读的是【疼痛】。同一解剖特征、两套体系、两种含义。
+#   裁决规则见 conflict_rules 中 "FGS 动作单元 与 signals 同名通道" 一条。
+#
+# ⚠️ 边界:本层只用于【提示】,不得用于诊断。见 hard_boundary。
+# ---------------------------------------------------------------------------
+pain_indicators:
+  scale_name: "Feline Grimace Scale (FGS)"
+  evidence_level: "高"
+  source: "10.1038/s41598-019-55693-8"
+  source_note: "Evangelista et al., 2019, Scientific Reports —— 量表开发与效度验证。"
+  evidence_grading_source: "10.1097/j.pain.0000000000002474"
+  evidence_grading_note: "Evangelista et al., 2021, Pain —— grimace 量表系统综述(9 物种 12 套量表),将 Feline Grimace Scale 列为高证据等级。"
+
+  scoring_rule: "5 个动作单元各评 0 / 1 / 2 分。无法可靠观察的单元记为不可观测,不得猜测填分。"
+
+  action_units:
+
+    - unit: "ear_position"
+      scoring:
+        0: "耳朵朝前"
+        1: "耳朵略微分开、轻微外旋"
+        2: "耳朵扁平外旋"
+      note: "与 signals.ear_position 读的不是同一件事:此处评的是疼痛相关的耳位改变,不是防御性唤醒。折耳品种该单元不可用。"
+
+    - unit: "orbital_tightening"
+      scoring:
+        0: "眼睑完全张开"
+        1: "眼睑部分闭合"
+        2: "眼睑明显眯紧"
+      note: "眼眶周围肌肉收缩。需排除强光刺激与困倦导致的眯眼。"
+
+    - unit: "muzzle_tension"
+      scoring:
+        0: "口鼻放松呈圆形"
+        1: "介于两者之间"
+        2: "口鼻紧张呈椭圆"
+      note: "扁脸品种(波斯等)的口鼻轮廓受品种结构限制,该单元应降级或标为不可观测,参见 breed_caveats。"
+
+    - unit: "whiskers_change"
+      scoring:
+        0: "自然弯曲放松"
+        1: "轻微前伸变直"
+        2: "明显前伸变直"
+      note: "与 signals.whisker_position 的'前伸扇开'形态相近但语义不同:此处指向疼痛,后者指向探查/专注。需结合其余动作单元共同判断,不得单独使用。长毛或低分辨率下不可观测。"
+
+    - unit: "head_position"
+      scoring:
+        0: "高于肩线"
+        1: "与肩线齐平"
+        2: "低于肩线或下颏收向胸部"
+      note: "需排除正在进食、嗅闻、睡眠等姿势性因素。"
+
+  threshold: "归一化总分 > 0.39(满分 1.0)提示需要镇痛干预,应建议由执业兽医评估。该 cut-off 来自 source 所列研究。"
+
+  reliability: "观察者间 ICC 0.89 (95%CI 0.85–0.92);观察者内 ICC >0.91;内部一致性 Cronbach's α 0.89;与另一已验证量表相关 rho=0.86 (p<0.001)。"
+
+  static_image_validity:
+    finding: "静态图片评分与实时观察几乎等效:偏差 -0.057,一致性区间 -0.351 至 0.237。"
+    source: "10.7717/peerj.8967"
+    source_note: "Evangelista et al., 2020, PeerJ —— 实时评分与照片评分的一致性研究。"
+    evidence_level: "高"
+    implication: "因此 FGS 相关判读【不因'只有一张照片'而降级】。这是单图模式中少数不受静态素材局限影响的通道。"
+
+  breed_caveats:
+    - "折耳品种:ear_position 单元不可用。"
+    - "无毛品种与修剪过触须的个体:whiskers_change 单元不可用。"
+    - "扁脸(brachycephalic)品种:muzzle_tension 单元受品种结构限制,应降级为不可观测或低置信度。鼻位比与吻部比越小,主人报告的呼吸异常评分越高(P<0.001 / P=0.026),提示其口鼻区形态本身即偏离常态基线。"
+    - "长毛个体或低分辨率素材:whiskers_change 与 orbital_tightening 常不可辨。"
+  breed_caveats_source: "10.1371/journal.pone.0161777"
+  breed_caveats_source_note: "Farnworth et al., 2016, PLoS ONE —— 扁脸猫颅面形态与主人报告的呼吸异常的关联。"
+
+  hard_boundary: "本量表用于【提示】而非诊断。输出只能是『观察到符合疼痛的面部特征,建议由执业兽医评估』,禁止断言疼痛(如『你的猫在痛』)、禁止推测病因、禁止给出任何用药或剂量建议。分数只用于决定是否提示就医,不得作为病情分级呈现给用户。"
+
+# ---------------------------------------------------------------------------
+# 时序信号:只有连续画面才能读到的通道
+#
+# ⚠️ 本层【仅在 video 模式可用】。单图 / 纯音频 / 文字模式下这些通道属【结构性不可观测】,
+#    写"不可观测"即可,【不得】因为读不到本层而判证据不足。
+# ---------------------------------------------------------------------------
+temporal_signals:
+  availability: "仅 video(连续画面)。image / audio / text 模式下全部标为不可观测,不计入分母。"
+
+  channels:
+
+    - channel: "tail_motion_dynamics"
+      values: ["静止", "尾尖轻弹", "大幅拍打", "整尾左右摆动", "颤抖尾", "缓慢波状摆动", "不可判定"]
+      reads: "尾部运动的频率、幅度与其随时间的变化方向(升高 / 下降)。"
+      confidence: "中"
+      evidence_level: "低"
+      source: "行为学通识(无特定文献)"
+      note: "单帧只能读到尾巴的位置,读不到运动。摆动频率可由运动曲线 FFT 主频近似,注意帧差能量在每个摆动周期出现两次峰值,主频约为实际摆尾频率的两倍(见 signals.tail.motion.measurement_note)。判读价值主要在于'尾尖轻弹频率是否随抚摸持续而升高'这类趋势,而非某一瞬间的取值。"
+
+    - channel: "ear_movement_dynamics"
+      values: ["无明显变化", "反复侧转扫描", "由中立转为飞机耳", "由飞机耳缓解为中立", "高频抽动", "不可判定"]
+      reads: "耳位随时间的变化方向,而非某一帧的耳位取值。"
+      confidence: "中"
+      evidence_level: "低"
+      source: "行为学通识(无特定文献)"
+      note: "方向比取值更有信息量:'由中立转为飞机耳'指示唤醒升高,是升级阶梯上的方向证据;反向则是缓解。犬类侧有针对耳根后拉的自动化分析证据(见 dog.yaml),猫侧本条【没有】等效的特定文献支持,故评级为低。折耳品种整体不可用。"
+
+    - channel: "open_mouth_breathing_dynamics"
+      values: ["无", "短暂张口", "持续张口呼吸", "不可判定"]
+      reads: "张口呼吸的出现时机与持续时长。"
+      confidence: "中"
+      evidence_level: "中"
+      source: "10.1371/journal.pone.0161777"
+      source_note: "Farnworth et al., 2016, PLoS ONE。"
+      note: "⚠️ 必须先排除结构性因素再当作唤醒信号读:扁脸(brachycephalic)品种的鼻位比与吻部比越小,主人报告的呼吸异常评分越高(P<0.001 / P=0.026)。扁脸个体的张口呼吸可能源于品种颅面结构而非情绪唤醒,不可直接计为唤醒升高。猫的张口呼吸在非高温、非剧烈活动后出现时,本身即为需要兽医评估的体征,应按 hard_boundary 的措辞提示就医,不得自行归因于情绪。"
+
+  usage_note: "本层用于补强 video 模式的方向判断(升级 / 缓解),不替代 signals 的逐帧编码。任一通道读不到时写'不可判定',不影响充分性判定。"
+
+# ---------------------------------------------------------------------------
 # 情境修正:同一形态在不同情境下功能相反的情形
 # ---------------------------------------------------------------------------
 context_modifiers:
@@ -471,6 +590,13 @@ conflict_rules:
     resolution: "位移信号在时间上先于姿态变化。密度规则触发时判为压力上升的早期阶段。"
     priority: "以位移信号为准"
     confidence: "中"
+
+  - conflicting: ["FGS 动作单元", "signals 中的同名通道(ear_position / whisker_position)"]
+    resolution: "两套体系读的是同一解剖特征的【不同维度】,不得混用、不得互相替代填值,也不得把同一处观察在两边各记一次当作两条独立证据。分别编码后按下面的优先级裁决:(1) 若 FGS 达到提示阈值(归一化 >0.39)且 ≥3 个动作单元可观测 —— 优先按疼痛线索处理,输出『观察到符合疼痛的面部特征,建议由执业兽医评估』,并同时保留唤醒/防御的解读,不要用情绪结论覆盖疼痛提示;(2) 若 FGS 未达阈值或可观测单元 <3 —— 按 signals 的唤醒/防御体系解读,FGS 只作佐证,不单独成立;(3) 两者指向冲突时(例:耳朵扁平外旋,FGS 计 2 分,而 signals 读作防御性飞机耳)—— 二者并不互斥,同一形态可以既是疼痛表现又是防御性唤醒,应【并列列为候选】而不是二选一,并在 missing_signals 里指出需要补充哪些单元或通道才能区分。"
+    priority: "疼痛提示优先于情绪归因(疼痛漏判的代价更高);但两者并存时并列输出,不做单一裁决"
+    confidence: "中"
+    evidence_level: "低"
+    source: "行为学通识(无特定文献)—— 裁决规则本身为本项目的工程约定,FGS 与其阈值的出处见 pain_indicators.source"
 
 # ---------------------------------------------------------------------------
 # 压力升级阶梯:从低强度回避到咬合
