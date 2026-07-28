@@ -108,6 +108,8 @@
 - 接口:`POST /analyze`(建后台任务,返回 job_id)、`GET /analyze/stream/{job_id}`(可重连 SSE 进度)、`/history`、`/export`、`/record/{id}`、`/feedback/{id}`、`/profiles`、`/healthz`。
 - **判读后台化 + 可重连:** 切屏、锁屏、断网、整页重载都不再丢结果;记录一定落库(与连接存活无关)。无头脚本验证过"中途断连→同 job_id 重连→结果照常返回+已写库"。
 - 上传双重校验(前端拦一次 + 后端边写边计字节数):视频 20MB / 图片 10MB / 音频 15MB。
+- **`behavior_patterns` 行为模式层**(commit `08fa466`):猫狗各 8 条高频复合动作,修复"用户描述的是行为、知识库只编码原子信号"的错配。详见第七节。
+- **判读完删上传原件**(commit `880f4e9`):`app.py` 的 `_cleanup_media()` 在 `_run_analysis_job` 的 `finally` 里调用,成功/模型报错/写库失败三条路径都会清理,frames 模式的 `_16k.wav` 一并删。删除失败只打日志、不影响判读结果。`records.media_path` 保留原值作为历史痕迹,但文件本身已不在。**理由:校准只需要库里的判读结果与反馈,原件既占磁盘又涉及隐私。**
 
 **部署:Railway,Dockerfile 构建。**
 
@@ -115,13 +117,23 @@
 - **端口不写死:** Railway 通过 `PORT` 环境变量注入,`app.py` 读 `os.environ["PORT"]`(缺省 7860),host 固定 `0.0.0.0`。端口优先级 `PORT` > `PETREAD_PORT` > 7860。
 - `MIMO_API_KEY`(和建议设的 `EXPORT_KEY`)在 Railway 项目 Variables 里配。
 - **访问地址:** 不在仓库里记录(README 说"见交付时单独给出的步骤说明")。恢复上下文时如果需要线上地址,去 Railway 面板看,或问用户。
-- **已知问题:国内访问不稳。** 线上平台的反代还可能有一层请求体上限,大文件 POST 可能 `413`;在线版建议视频控制在 5–10s、10MB 以内最稳。
+- **已知问题:国内访问不稳,基本要挂 VPN 才能打开。** 线上平台的反代还可能有一层请求体上限,大文件 POST 可能 `413`;在线版建议视频控制在 5–10s、10MB 以内最稳。
+
+**关于迁移(2026-07-28 调研结论,已决定暂不迁):**
+
+调研过换到国内能直连的平台,结论是**都要花钱,而项目定位是自用、不盈利,所以先不迁**:
+
+- **Zeabur** —— 它的 `Free $0` 只是**控制台**免费(含"可管理自有服务器 1 台"),**不含跑应用的算力**。实际部署要选云厂商+地区付费:香港 $6/月、东京/新加坡/首尔 $3/月(均为 2vCPU/2GB/40GB SSD),北京等大陆节点 $7/月但**要 ICP 备案**。可能还要叠加 Dev 计划 $5/月。
+- **国内云(阿里云/腾讯云)** —— 轻量服务器很便宜(38 元/年起),但必须 **ICP 备案**(要求所购服务器时长 ≥3 个月才能提交,审核通常一到三周),且要自己装 Docker/nginx/证书,运维成本高。
+- **结论:** 想让国内用户免 VPN 访问,最低约 260 元/年(东京/新加坡)。**决定先留在 Railway**,等工具本身打磨好、确实需要分享给别人时再迁。
+- **绕开部署的替代方案(推荐):** 让朋友微信发**视频**给你,你自己丢进工具跑。这样既不用部署,拿到的数据质量还更高(发视频的人知道宠物当时的真实状态,反馈填得准)。
 
 **数据持久化 & 按设备隔离历史:**
 
-- **持久化:** SQLite + 上传文件都放 `DATA_DIR`(默认项目内 `./data`,Docker 内默认 `/app/data`)。**⚠️ Railway 容器文件系统是临时的,重新部署/重启后 SQLite 和上传文件都会丢——这不是 bug。** 要保留数据必须在 Railway 加 Volume 挂到某路径,再把 `DATA_DIR` 设成那个挂载点。**目前是否已挂 Volume,需去 Railway 面板确认**(仓库里看不出来)。
-- **按设备隔离:** 已实现。前端首次访问生成随机 `client_id`(UUID)存 localStorage,之后 `/analyze`、`/history` 都带上。`/history` 只返回该设备自己的记录;没有 client_id 的老数据不返回给任何人。`store.py` 有对应迁移(老库 `ALTER TABLE` 补 `client_id` 列)。
-  - **⚠️ 注意:** 这套 client_id 隔离 + EXPORT_KEY 保护的代码,截至本文写作时**在工作区里已写好但尚未 commit**(涉及 `app.py`、`index.html`、`pipeline/store.py`、`.env.example`、`README.md`)。新会话如果 `git log` 里看不到它,先 `git status` 看是否还挂在工作区未提交。
+- **持久化:已配置完成。** SQLite + 上传文件都放 `DATA_DIR`。Railway 上已挂 Volume 到 `/data`,并把服务变量 `DATA_DIR` 设为 `/data`(**两者必须一字不差,否则数据写进临时盘、重启即丢**)。Dockerfile 里的 `ENV DATA_DIR=/app/data` 只是默认值,会被平台变量覆盖。
+  - **历史教训:** 挂 Volume 之前产生的记录都存在临时盘上,挂卷那次重新部署时**已全部清空且无法恢复**。挂卷后的首次部署 `/data` 是空的,旧数据不会迁移——这是正常现象,不是 bug。
+  - **验证方法:** 提交一条判读 → 手动 Redeploy → 看历史还在不在。
+- **按设备隔离:已实现并推送**(commit `478914c`)。前端首次访问生成随机 `client_id`(UUID)存 localStorage,之后 `/analyze`、`/history` 都带上。`/history` 只返回该设备自己的记录;没有 client_id 的老数据不返回给任何人。`store.py` 有对应迁移(老库 `ALTER TABLE` 补 `client_id` 列)。`/export` 则**不按 client_id 过滤**(要看全量做校准),改用 `EXPORT_KEY` 口令 + `hmac.compare_digest` 保护,未设 key 时直接 503。
 
 ---
 
@@ -136,6 +148,8 @@
 5. **充分性判据(尤其单图"主轴≥1 且可观测≥2")的松紧**没经真实数据检验。**重点看:** 真实单图里判 insufficient 的比例是否合理——太高说明门槛仍偏严,太低说明在证据不足时硬给了结论。
 6. **护栏的误杀/漏杀。** 否定感知和邻近判定的窗口大小(8 字 / 14 字)是经验值。**重点看:** 导出的 suggestion 里有没有被误杀的正确建议,或漏网的"惩罚警告信号"类建议。
 7. **知识库本身的覆盖度。** 编码表是行为学通识的编码,不是诊断工具;真实个体的品种形态学差异(垂耳/断尾/扁脸/长毛)对通道置信度的削弱是否被正确降级,缺真实样本验证。
+8. **⚠️ `behavior_patterns` 层加完后尚未在真实素材上验证。** 这是当前**最该先做**的一条。它是为修复一个具体案例加的:文字输入"猫抱着人的腿咬"曾被判"信息不足"。**重点看:** 同样输入现在是否变成输出低置信度候选(捕猎性玩耍/过度刺激,confidence_cap 0.6),并在 `missing_signals` 里提示补充耳位、发声、前置情境。**回归也要看:** 纯结论式输入("它好像不开心")必须**仍然**判 insufficient——那条没有客观观察,不该出候选。
+9. **知识库注入体积会拖慢判读(已量化,尚未优化)。** `prompts.py` 的 `build_system_prompt` 用 `_dump_yaml(knowledge)` 把**整个**知识库无差别塞进 system prompt,不区分模态。实测每物种约 **1.5 万字符**(中文大致 1 字符≈1 token)。后果:单图模式白白携带整块 `acoustic` 发声表(单图没有音轨),纯音频模式白白携带整块 `signals` 视觉编码表(纯音频没有画面)。**再往知识库加层会进一步推高延迟与成本**,见第六节的优化待办。
 
 ---
 
@@ -148,29 +162,57 @@
 3. **基于真实数据做个体校准:** 找系统性偏差(比如"这只狗的低吼总被判成威胁,实际是玩耍""这只猫的某姿势老被高估紧张度")→ 把发现写进知识库。
 4. **个体校准写在哪里(见第七节末):** 目前知识库**还没有**专门的"个体档案"段落。可选两条路:(a) 直接在对应物种的 yaml 里调 values / value_confidence / context_modifiers / conflict_rules;(b) 新增一个个体档案段落并在 `prompts.py` 里注入(目前 `profiles` 表存了 `calibration_notes` 但**没有喂给模型**,见待办)。
 
-**待办:**
+**攒数据的现实约束(重要):** 国内访问要 VPN,所以指望陌生用户上来贡献数据不现实,而且陌生用户多半不填反馈——**没有反馈的记录对校准是零价值**。可行的路子是:
 
-- **确认数据持久化是否真的生效**(Railway 是否挂了 Volume 并把 `DATA_DIR` 指过去)。没挂的话,攒的反馈会在下次部署时丢——这直接威胁第六节整个计划,**优先级最高**。
-- **确认 client_id 隔离 + EXPORT_KEY 那批改动已 commit 并 push**(见第四节末的警告)。
-- **把 `profiles` 表接进判读链路。** 现在 `/profiles` 能存 `calibration_notes`,但 `analyze.py`/`prompts.py` 完全没读它,个体校准备注等于白存。要么把它注入 prompt,要么明确走"改 yaml"这条路、把 profiles 表下掉。
+- 自家宠物,一周十几条,按**场景**去凑覆盖面(吃饭前、开门回家、独处、玩耍、被摸烦、见生人、**放松基线**——基线样本别漏,否则全是高唤醒样本)。
+- 朋友微信发视频给你 + 一句"它当时在干嘛",你自己跑。质量比陌生人自助提交更高。
+- **10 条带反馈的,顶 100 条不带的。**
+
+**待办(按优先级):**
+
+1. **先验证 `behavior_patterns` 是否真的生效**(见第五节第 8 条)。在往知识库上叠更多层之前必须先确认这一层有效,否则方向错了后面更难排查。
+2. **知识库按模态裁剪注入。** 新增 `prune_knowledge(knowledge, modality)`,在 `build_system_prompt` 里按模态剔除用不上的块:image 剔 `acoustic`、audio 剔 `signals`、非 video 剔时序类。任何模态都必须保留:`meta`、`output_constraints`、`conflict_rules`、`context_modifiers`、`behavior_patterns`。注意 `build_system_prompt` 现签名是 `(species, knowledge, task)`,要把 modality 传进去并给默认值 `"video"`,别改坏 `vision_prompt`/`audio_prompt`/`fusion_prompt` 三个旧入口。**这一步能直接缓解"判读慢"。**
+3. **基于文献补两层(已调研,提示词已备好,尚未实施):**
+   - `pain_indicators` —— 猫用 Feline Grimace Scale(5 个动作单元:耳位、眼眶紧缩、口鼻紧张、胡须变化、头位,各 0–2 分,归一化总分 >0.39 提示疼痛;观察者间 ICC 0.89)。**关键:该量表的实时评分与看照片评分几乎等效(偏差 -0.057),这是给单图模式提高置信度的实证依据。** 狗侧缺少等效的已验证量表,证据等级要相应降低。
+   - `temporal_signals` —— 只有视频能读的信号:摇尾左右不对称、耳根后拉的时序、张口/喘息(扁脸品种需先排除结构性因素)。
+   - **两条铁律:** ①每条来自文献的必须带真实 DOI 的 `source` 字段,**绝不许编造文献/作者/年份**(这是 `meta.hard_constraints` 明令禁止的);②疼痛相关**只提示不诊断**,措辞只能是"观察到符合疼痛的面部特征,建议由执业兽医评估"。
+   - ⚠️ FGS 的 `ear_position`/`whiskers` 与现有 `signals` 同名通道**读的是不同维度**(疼痛 vs 唤醒/防御),必须在 `conflict_rules` 里加一条裁决规则,别让模型混用。
+   - **已核实的文献(经 PubMed 检索,DOI 可直接用于 `source` 字段;不在此列表内的一律不许现编):**
+
+     | 用途 | 关键结论 | DOI |
+     |---|---|---|
+     | FGS 量表本体 | 5 个动作单元各 0–2 分;cut-off >0.39;观察者间 ICC 0.89、观察者内 >0.91、Cronbach's α 0.89、与另一已验证量表 rho=0.86 | `10.1038/s41598-019-55693-8` |
+     | **单图模式的实证依据** | FGS 实时评分 vs 看照片评分偏差仅 -0.057、一致性区间窄 → 静态图片评分与实时观察近乎等效 | `10.7717/peerj.8967` |
+     | 证据等级 | 9 物种 12 套 grimace 量表的系统综述,FGS 属**高证据等级** | `10.1097/j.pain.0000000000002474` |
+     | 狗·恐惧(视频) | 用主人自拍家庭视频做的自动化分析:**耳根后拉是最强恐惧指标**,伴随张口;因品种形态差异大,研究者主动剔除耳廓标记点(印证本项目的形态学 caveats) | `10.1038/s41598-025-15741-y` |
+     | 狗·摇尾不对称(视频) | 偏左摆尾令观察者狗心率升高、焦虑行为增多;偏右则否。**注意:这测的是观察者的反应,不是摆尾个体的内在状态**,confidence 不得高于"中" | `10.1016/j.cub.2013.09.027` |
+     | 扁脸品种 caveat | 鼻位比/吻部比越小,主人报告的呼吸异常越多 → 扁脸猫的"张口喘息"可能源于结构而非唤醒,不可直接当唤醒信号 | `10.1371/journal.pone.0161777` |
+
+   - **文字模式的证据现状:如实记录——没找到强证据支撑。** 因此 text 模式不得编造文献依据;可以让模型把描述里提到的面部特征映射到 FGS 动作单元,但置信度上限维持 0.65,且 evidence 里必须写明"依据主人转述,非直接观测"。
+4. **把 `profiles` 表接进判读链路。** 现在 `/profiles` 能存 `calibration_notes`,但 `analyze.py`/`prompts.py` 完全没读它,个体校准备注等于白存。要么把它注入 prompt,要么明确走"改 yaml"这条路、把 profiles 表下掉。
 
 ---
 
 ## 七、知识库结构说明
 
-`knowledge/dog.yaml`(419 行)、`knowledge/cat.yaml`(431 行)。两个文件结构一致,顶层字段:
+`knowledge/dog.yaml`、`knowledge/cat.yaml`(各约 500 行、1.7 万字符)。两个文件结构一致,顶层字段:
 
 | 字段 | 含义 | 能不能手调 |
 |---|---|---|
 | `meta` | 元信息:`species`、`framework`(犬=Dog Body Language Ladder)、`confidence_scale`(高/中/低各自定义)、`reading_order`(判读主轴顺序:先体态→再距离调节→最后单点信号)、`hard_constraints`(硬约束,如"任一单通道不足以定论,至少三通道一致")。 | `reading_order`、`hard_constraints`、`confidence_scale` 都可调,但它们影响全局判读逻辑,慎改。 |
 | `signals` | 视觉信号编码表,按通道组织。犬通道:`ear_position`、`tail`、`body_posture`、`mouth`、`eye`、`displacement_signals`;猫通道:`ear_position`、`tail`、`pupil`、`whisker_position`、`body_posture`、`affiliative_signals`、`displacement_signals`。每个通道有 `values`(允许取值)、`confidence`/`value_confidence`(通道或取值的置信度)、`caveats`(品种形态学等注意事项);`tail` 等有 `dimensions` 子维度。 | **主要手调对象。** 调 values 措辞、value_confidence 等级、caveats 都在这里。 |
 | `acoustic` | 声学模式表(pattern 列表)。犬 9 种(低频单音长吠/低吼/玩耍性低吼/呜咽…),猫 10 种(purr/meow/hiss/growl/yowl/pain shriek…)。每项有 f0_range、confidence 等。 | 可调 f0_range 分档、confidence。 |
+| `behavior_patterns` | **复合行为层**(commit `08fa466` 新增)。猫狗各 8 条。字段:`pattern`(行为名)、`typical_phrases`(用户口语描述,用来匹配)、`candidates`(并列候选,不硬选一个)、`confidence_cap`(该行为单独的置信度上限,如 0.6)、`distinguishing_signals`(区分候选的关键信号)、`notes`(含"孤立一次不诊断攻击性"这类边界)。 | **可调,也是个体校准的好落点。** |
 | `context_modifiers` | 情境改写规则:命中 `override_when` 条件时按 `override_to` 重新解读(处理"形态相同、含义相反"的情形)。 | **个体校准的主要落点之一。** |
 | `conflict_rules` | 信号冲突裁决:出现 `conflicting` 信号组合时按 `resolution` 裁决,遵守 `priority` 通道优先级。 | **个体校准的主要落点之一。** |
 | `escalation_ladder` | 情绪升级阶梯(犬 level 1–7)。用于判断帧间变化方向(升级/缓解/横向)和识别"警告信号"(level≥5 的信号进护栏保护名单)。 | 可调,但改动会连带影响方向判定和护栏。 |
 | `output_constraints` | 逐条注入 system prompt 的输出约束。 | 可调。 |
 
-**个体校准写在哪里(明确回答):** 当前 yaml **没有**独立的"个体档案 / individual profile"段落。做个体校准时,把发现的系统性偏差写进上表标了"个体校准落点"的位置——优先 `context_modifiers`(条件化改写)和 `conflict_rules`(冲突裁决),其次直接调对应通道的 `value_confidence`。如果要做成"每只宠物一份档案"的结构,需要新增段落 + 在 `prompts.py::build_system_prompt` / `omni_prompt` 里注入(目前没有这个注入点,`profiles` 表也还没接进链路——见第六节待办)。
+**为什么要有 `behavior_patterns` 这一层(设计意图,别删掉它):** `signals` 编码的是**静态原子信号**("飞机耳""尾巴拍打"),而真实用户描述的是**复合行为**("抱着腿咬""扑我手""追尾巴")。两边对不上时,模型在编码表里找不到落点,只能把所有通道标"不可观测",最后判"信息不足"——文字和图片模式因此系统性失败。这一层就是架在两者之间的桥:命中 `typical_phrases` 即可按 `candidates` 出**低置信度**候选(受 `confidence_cap` 约束),并用 `distinguishing_signals` 提示用户补哪些通道。**注意:它的作用是让工具"敢给一个可被证伪的猜测",而不是提高确定性**——给了猜测用户才能点"对/不对",你才收得到校准反馈。
+
+**个体校准写在哪里(明确回答):** 当前 yaml **没有**独立的"个体档案 / individual profile"段落。做个体校准时,把发现的系统性偏差写进上表标了"个体校准落点"的位置——优先 `context_modifiers`(条件化改写)和 `conflict_rules`(冲突裁决),其次是 `behavior_patterns`(调某个行为的 `candidates` 顺序或 `confidence_cap`),再次是直接调对应通道的 `value_confidence`。如果要做成"每只宠物一份档案"的结构,需要新增段落 + 在 `prompts.py::build_system_prompt` / `omni_prompt` 里注入(目前没有这个注入点,`profiles` 表也还没接进链路——见第六节待办)。
+
+**注入方式的隐含代价:** `build_system_prompt` 会把整个知识库 dump 进 system prompt,所以**往这里加任何东西都会直接推高每次调用的 token 与延迟**。加新层前先想清楚它是否值这个成本,并优先做第六节待办 2 的按模态裁剪。
 
 ---
 
