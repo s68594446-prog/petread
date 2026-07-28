@@ -651,9 +651,26 @@ def _sufficiency_rules(modality: str, knowledge: dict) -> str:
 体态/身体姿势、耳朵位置,或一个明确的可复核行为动作(如"往后退""扑上来""贴着人蹭")。
 满足即正常出候选(低置信度)。
 
+**命中 behavior_patterns 同样满足出候选条件(重要):**
+用户描述的往往是**复合行为**("抱着我的腿咬""追自己尾巴""踩奶"),而 signals 编码的是
+**静态原子信号**。描述命中知识库 behavior_patterns 里某个 pattern 的 typical_phrases 时:
+- **按该 pattern 的 candidates 并列给出候选**(不要硬选一个),这本身即构成可判读的客观行为;
+- confidence **不得超过该 pattern 的 confidence_cap**,且同时不得超过文字模态上限 0.65,
+  两者取更小值;
+- 把该 pattern 的 distinguishing_signals 指向的通道写进 **missing_signals**,
+  说明补充它们才能在几个候选之间区分;
+- evidence 里 knowledge_basis 引用该 pattern 条目(pattern 名与 notes),
+  channel 可写 "behavior_pattern"。
+- 此时**不得**判 insufficient_evidence —— 用户已经描述了一个可映射的客观行为,
+  只是缺少用于区分候选的原子信号,那是**降低置信度并写进 missing_signals** 的理由,
+  不是拒绝判读的理由。
+
 **insufficient_evidence 必须为 true(并引导补充)当:**
 - 描述里只有用户自己的结论(如"它好像不开心""感觉怪怪的""它在闹脾气"),
-  没有任何可映射到编码表的客观形态/动作;
+  没有任何可映射到编码表的客观形态/动作,**也没有命中任何 behavior_pattern**;
+  (注意:纯结论不构成行为描述 —— "它好像不太开心"没有描述任何动作,
+   不得因为情绪词与某个 pattern 的候选相近就算作命中 typical_phrases。
+   命中的前提是用户描述了一个**可复核的动作**。)
 - 或描述空泛到读不出任何主轴信号;
 - 或所有候选 confidence 都低于 0.5。
   此时 insufficient_reason 说明"描述里缺少可判读的客观观察",
@@ -678,6 +695,21 @@ def _sufficiency_rules(modality: str, knowledge: dict) -> str:
 例:只有"耳位 + 体态"两个可读,其余全不可观测 —— 这是**充分**的,照常出候选。
 耳位与体态是行为学判读的主轴信号,它们可读时单张照片已经足以支撑一个低置信度判断。
 
+**(c) 画面命中 behavior_patterns 时同样满足出候选条件(与 (a)(b) 并列,任一满足即可):**
+画面里呈现的往往是一个**复合动作**(抱咬后腿踢、作揖邀玩、低伏摆臀),而 signals 编码的是
+**静态原子信号**。画面内容命中知识库 behavior_patterns 里某个 pattern 的 typical_phrases
+所描述的动作形态时:
+- **按该 pattern 的 candidates 并列给出候选**(不要硬选一个);
+- confidence **不得超过该 pattern 的 confidence_cap**,且同时不得超过单图上限 0.75,
+  两者取更小值;
+- 把该 pattern 的 distinguishing_signals 指向的通道写进 **missing_signals**,
+  说明补充它们才能在几个候选之间区分;
+- evidence 里 knowledge_basis 引用该 pattern 条目,channel 可写 "behavior_pattern"。
+- 此时**不得**判 insufficient_evidence:画面已呈现可映射的客观行为,缺的只是用于区分候选的
+  原子信号 —— 那是**降低置信度并写进 missing_signals** 的理由,不是拒绝判读的理由。
+- 注意单帧局限:静态画面可能无法确认动作的完整序列(如是否真有后腿踢、是否有摆尾蓄力),
+  不确定时应在 evidence 中写明,并让候选保持并列。
+
 **永不计入分母的通道**(读不到是素材类型使然,不是证据不足):
 {never}
   这些通道写 "不可观测" 即可。**读不到不扣分;读到了则计入 (b) 的可观测总数(加分项)。**
@@ -685,8 +717,8 @@ def _sufficiency_rules(modality: str, knowledge: dict) -> str:
 **insufficient_evidence 只在下列情况为 true:**
 - 画面中没有目标物种;
 - 个体严重模糊 / 过曝 / 欠曝到读不出形态;
-- 主体被完全遮挡,主轴通道(体态、耳位)一个都读不出;
-- 可观测通道总数 < 2;
+- 主体被完全遮挡,主轴通道(体态、耳位)一个都读不出,**且**画面也未命中任何 behavior_pattern;
+- 可观测通道总数 < 2,**且**画面未命中任何 behavior_pattern;
 - 所有候选的 confidence 都低于 0.5。
 除此之外**不得**以"只有一张照片""缺少时间维度""通道数偏少"为由判证据不足。
 
@@ -797,7 +829,15 @@ def omni_prompt(
   · 用户结论 = 用户自己的判断,例:"它很紧张""它生气了""它不开心"。
     → 记下供参考,**绝不作为依据**,更不能因为用户已下结论就顺着给高置信度。
 - **主动指出缺失(填 missing_signals):** 把描述里没覆盖、但对本物种判读重要的通道
-  (尤其主轴的体态、耳位,以及尾巴、发声)列进 missing_signals,并说明补充它为何能提高可靠性。"""
+  (尤其主轴的体态、耳位,以及尾巴、发声)列进 missing_signals,并说明补充它为何能提高可靠性。
+
+- **除了映射到 signals 编码表,也要把描述里的复合动作匹配到知识库的 behavior_patterns。**
+  用户说的常常是**行为**("抱着我的腿咬""追自己尾巴""踩奶"),而 signals 里只有**静态原子信号**,
+  直接找不到落点 —— 这时**不要**因为通道对不上就全标"不可观测"。
+  命中某个 pattern 的 typical_phrases 时:按其 candidates **并列**给出低置信度候选
+  (confidence 取 该 pattern 的 confidence_cap 与文字模态上限 0.65 中的较小值),
+  并把其 distinguishing_signals 指向的通道逐条列进 missing_signals。
+  命中 pattern 即已具备判读基础,**不得**据此判证据不足(判据见第五步)。"""
     elif modality == "audio":
         step1 = """════════ 第一步:视觉信号编码(填入 visual_signals) ════════
 
@@ -818,7 +858,13 @@ timeline 中的 visual 字段一律写 null。这不是信息缺失,是素材类
 {f"- 本次素材中以下通道属于结构性不可观测,写 “不可观测” 即可,不必勉强判读:{absent['channels']}。{absent['note']}" if absent["channels"] else ""}
 {'''- **重点读主轴:** 优先把 body_posture(整体重心与肌肉张力)和 ear_position 读准,
   这两个是判读主轴,单帧里通常都能读到。其余通道读不到就写 "不可观测",不必勉强,
-  也不要因为它们读不到就认为整体证据不足 —— 充分性判据见第五步。''' if modality == "image" else ""}"""
+  也不要因为它们读不到就认为整体证据不足 —— 充分性判据见第五步。
+- **除了映射到 signals 编码表,也要把画面里的复合动作匹配到知识库的 behavior_patterns。**
+  画面里常常是一个**动作**(抱咬后腿踢、作揖邀玩、低伏摆臀),而 signals 里只有**静态原子信号**,
+  直接找不到落点 —— 这时**不要**因为通道对不上就全标 "不可观测"。
+  命中某个 pattern 时:按其 candidates **并列**给出低置信度候选(confidence 取该 pattern 的
+  confidence_cap 与单图上限 0.75 中的较小值),并把其 distinguishing_signals 指向的通道
+  逐条列进 missing_signals。命中 pattern 即已具备判读基础,**不得**据此判证据不足。''' if modality == "image" else ""}"""
 
     if modality == "text":
         step2 = f"""════════ 第二步:从描述提取声音(填入 audio_events) ════════
