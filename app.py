@@ -226,6 +226,27 @@ def _job_finish(job: dict, event: str, payload: dict) -> None:
     job["finished_at"] = time.time()
 
 
+def _cleanup_media(media_path: str) -> None:
+    """判读结束后删掉上传的媒体原件。
+
+    留下来的是库里的判读结果(result JSON)与用户反馈——校准只需要这些。
+    原件既占磁盘又涉及隐私,判完就没有保留价值了。
+    records.media_path 仍保留原值作为历史痕迹,只是文件本身不在了。
+
+    清理是尽力而为:任何删除失败都只打日志,绝不能影响已经跑完的判读结果。
+    """
+    if not media_path:
+        return                      # text 模式没有媒体文件
+    # frames 模式会在同目录额外生成 <媒体名>_16k.wav 音轨(见 analyze._run_frames)
+    for path in (media_path, os.path.splitext(media_path)[0] + "_16k.wav"):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass                    # 本来就没有(非 frames 模式的音轨)
+        except OSError as exc:
+            print(f"[petread] 清理上传文件失败(不影响判读): {path} {exc}")
+
+
 async def _run_analysis_job(
     job: dict, *, media_path: str, size: int, species: str, context: str,
     mode: str, provider, knowledge: dict, max_frames: int, text: str, client_id: str,
@@ -248,52 +269,60 @@ async def _run_analysis_job(
         "message": ("已收到描述,开始处理…" if mode == "text"
                     else f"已接收 {size / 1024 / 1024:.1f}MB,开始处理…")})
 
+    # finally 保证成功 / 模型报错 / 写库失败三条出口都会清理媒体原件。
     try:
-        out = await loop.run_in_executor(None, work)
-    except Exception as exc:                       # 判读层不该抛,兜住以免任务卡在未完成
-        _job_finish(job, "error", {"message": f"{type(exc).__name__}: {exc}"})
-        return
+        try:
+            out = await loop.run_in_executor(None, work)
+        except Exception as exc:                   # 判读层不该抛,兜住以免任务卡在未完成
+            _job_finish(job, "error", {"message": f"{type(exc).__name__}: {exc}"})
+            return
 
-    result = out.get("result") or {}
-    if "error" in result:
-        _job_finish(job, "error", {
-            "message": result["error"], "raw": str(result.get("raw", ""))[:2000]})
-        return
+        result = out.get("result") or {}
+        if "error" in result:
+            _job_finish(job, "error", {
+                "message": result["error"], "raw": str(result.get("raw", ""))[:2000]})
+            return
 
-    label, confidence = store.summarize_result(result)
-    # text 模式的观察描述并进 context 一起存,否则校准回顾时看不到用户输入了什么
-    stored_context = context
-    if mode == "text":
-        desc = f"文字描述:{text}"
-        stored_context = f"{context}｜{desc}" if context else desc
-    try:
-        record_id = store.insert_record(
-            species=species, mode=mode, context=stored_context, media_path=media_path,
-            result=result, predicted_label=label, confidence=confidence,
-            tokens_in=out.get("tokens_in"), tokens_out=out.get("tokens_out"),
-            latency_s=out.get("latency_s"), provider=out.get("provider"),
-            model=out.get("model"), client_id=client_id)
-    except Exception as exc:
-        _job_finish(job, "error", {"message": f"写库失败 {type(exc).__name__}: {exc}"})
-        return
+        label, confidence = store.summarize_result(result)
+        # text 模式的观察描述并进 context 一起存,否则校准回顾时看不到用户输入了什么
+        stored_context = context
+        if mode == "text":
+            desc = f"文字描述:{text}"
+            stored_context = f"{context}｜{desc}" if context else desc
+        try:
+            record_id = store.insert_record(
+                species=species, mode=mode, context=stored_context,
+                media_path=media_path,
+                result=result, predicted_label=label, confidence=confidence,
+                tokens_in=out.get("tokens_in"), tokens_out=out.get("tokens_out"),
+                latency_s=out.get("latency_s"), provider=out.get("provider"),
+                model=out.get("model"), client_id=client_id)
+        except Exception as exc:
+            _job_finish(job, "error",
+                        {"message": f"写库失败 {type(exc).__name__}: {exc}"})
+            return
 
-    _job_emit(job, "progress", {"stage": "persist", "percent": 100, "message": "完成"})
-    _job_finish(job, "done", {
-        "record_id": record_id,
-        "result": result,
-        "meta": {
-            "mode": mode,
-            "species": species,
-            "tokens_in": out.get("tokens_in"),
-            "tokens_out": out.get("tokens_out"),
-            "latency_s": out.get("latency_s"),
-            "provider": out.get("provider"),
-            "model": out.get("model"),
-            "motion_features": out.get("motion_features"),
-            "predicted_label": label,
-            "confidence": confidence,
-        },
-    })
+        _job_emit(job, "progress",
+                  {"stage": "persist", "percent": 100, "message": "完成"})
+        _job_finish(job, "done", {
+            "record_id": record_id,
+            "result": result,
+            "meta": {
+                "mode": mode,
+                "species": species,
+                "tokens_in": out.get("tokens_in"),
+                "tokens_out": out.get("tokens_out"),
+                "latency_s": out.get("latency_s"),
+                "provider": out.get("provider"),
+                "model": out.get("model"),
+                "motion_features": out.get("motion_features"),
+                "predicted_label": label,
+                "confidence": confidence,
+            },
+        })
+    finally:
+        # 判读已结束(无论结果如何),媒体原件的使命完成。
+        _cleanup_media(media_path)
 
 
 @app.post("/analyze")
