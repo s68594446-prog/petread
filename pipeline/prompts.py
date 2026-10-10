@@ -543,7 +543,7 @@ def fusion_prompt(
 
 
 # ---------------------------------------------------------------------------
-# 4. 全模态单次调用(MiMo-V2.5 等原生多模态模型)
+# 4. 全模态单次调用(MiMo-V2.6-Flash 等原生多模态模型)
 # ---------------------------------------------------------------------------
 
 OMNI_SCHEMA = {
@@ -1172,3 +1172,4 @@ if __name__ == "__main__":  # 快速查看三段 prompt 的体积构成
         f = fusion_prompt({}, {}, {}, "客厅,主人接近", kb, species=sp)
         print(f"[{sp}] system={len(v.system)}  vision_user={len(v.user)}  "
               f"audio_user={len(a.user)}  fusion_user={len(f.user)}")
+

@@ -20,12 +20,12 @@
 
 ## 二、技术栈与架构
 
-**模型:小米 MiMo-V2.5**(全模态,OpenAI 协议兼容,一次调用完成视觉+声学+融合)。
+**模型:小米 MiMo-V2.6-Flash**(全模态,OpenAI 协议兼容,一次调用完成视觉+声学+融合)。迁移验证状态见 `MIGRATION.md`；此文不代表线上已部署。
 
 - `base_url`: `https://api.xiaomimimo.com/v1`(在 `config.yaml`)
-- 模型名: `mimo-v2.5`
+- 模型名: `mimo-v2.6-flash`
 - 鉴权: API key 只从环境变量 `MIMO_API_KEY` 读,`config.yaml` 里只写变量名。`auth_header: bearer`,遇 401 会自动换成 `api-key: <key>` 形式重试一次并打印生效的那种。
-- 其他参数(经 `extra_body` 并入请求体顶层):`thinking: true`、`fps: 2`(native 模式视频采样帧率)、`media_resolution: default`、`timeout: 300s`、`max_retries: 3`(只对网络错误和 5xx 重试,4xx 不重试)、`confidence_floor: 0.5`。
+- 请求顶层:`thinking: true`、`max_completion_tokens: 32768`(含推理)。视频 content part:`fps: 2`、`media_resolution: default`，与 `video_url` 同级。客户端:`timeout: 300s`、`max_retries: 3`(只对网络错误和 5xx 重试,4xx 不重试)、`confidence_floor: 0.5`。
 
 **后端 FastAPI + 前端单文件 HTML + SQLite 存储。** 前端无框架、内联 CSS/JS。
 
@@ -234,3 +234,4 @@
 # 启动服务
 .venv/bin/python app.py     # 默认 0.0.0.0:7860
 ```
+
