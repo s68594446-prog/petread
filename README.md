@@ -18,7 +18,7 @@
 **1. 克隆并装依赖**
 
 ```bash
-git clone git@github.com:<你的账号>/petread.git
+git clone https://github.com/s68594446-prog/petread.git
 cd petread
 ```
 
@@ -77,7 +77,7 @@ hostname -I | awk '{print $1}'    # Linux
 
 浏览器打开后:选物种 → 选场景标签(可多选)+ 补充描述 → 录视频或拍照 → 开始判读。
 
-处理需要 20–30 秒,页面有进度条和已用秒数,不会干等。
+处理时间取决于素材、模型和网络；页面显示进度与已用秒数。
 
 结果分三层,默认只展开第一层:
 
@@ -105,7 +105,7 @@ localStorage,之后 `/analyze`、`/history` 都带上它。`/history` 只返回�
 前端导出按钮会提示输入口令并记在本地,失败自动清除重问。
 
 **两处判读增强(native / quick 都生效):**
-- **跨时段一致性**:视频会被切成 2–4 段分别判读,各段一致则上调置信度、矛盾则下调,
+- **跨时段一致性**:提示词要求模型按 2–4 个时间段分别判读,各段一致则上调置信度、矛盾则下调,
   让置信度反映跨时间的稳定性而非单个瞬间。单图/纯音频只有一个时间切面,标为"无法评估",
   不因"看着一致"而加分。
 - **强制反方论证**:给出主判断后必须论证"什么情况下它是错的"——列出反方假设、若成立本应
@@ -137,7 +137,7 @@ localStorage,之后 `/analyze`、`/history` 都带上它。`/history` 只返回�
 只看声学证据。insufficient 只在真正读不出主轴信号时触发(没有动物、严重模糊、主体全遮挡)——
 否则只要不是视频就会被必然判成"信息不足",那是规则缺陷而不是事实。
 
-实测同一段素材:native 约 12.6k tokens / 24s,frames 约 32.2k tokens / 72s。
+历史单样本记录：native 约 12.6k tokens / 24s，frames 约 32.2k tokens / 72s。这不是当前版本的性能保证。
 
 ## 上传限制
 
@@ -186,7 +186,8 @@ localStorage,之后 `/analyze`、`/history` 都带上它。`/history` 只返回�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` | 前端页面 |
-| POST | `/analyze` | multipart 上传,返回 SSE 流(进度 + 最终结果) |
+| POST | `/analyze` | multipart 上传，创建后台任务并返回 JSON `job_id` |
+| GET | `/analyze/stream/{job_id}` | SSE 订阅进度与最终结果，可重连 |
 | GET | `/history?client_id=&limit=30` | 该设备的历史记录(无 client_id 返回空) |
 | GET | `/export?key=` | 导出**全部设备**的 records + feedback 为 CSV(需 EXPORT_KEY 口令) |
 | GET | `/record/{id}` | 单条详情(含反馈) |
@@ -194,7 +195,7 @@ localStorage,之后 `/analyze`、`/history` 都带上它。`/history` 只返回�
 | GET/POST | `/profiles` | 宠物档案 |
 | GET | `/healthz` | 健康检查,含 key 是否就位 |
 
-`/analyze` 直接返回 `text/event-stream`,前端用 fetch + ReadableStream 读。EventSource 只能发 GET、带不了 multipart,所以没用它——代价是没有自动重连,一次判读 20–30 秒,断了重传即可。
+`POST /analyze` 返回任务 ID；前端通过 `EventSource` 订阅 GET 流。断线后可用同一个 ID 重连。任务保存在单进程内存，完成后保留约 30 分钟；进程重启会丢失任务状态，已写入 SQLite 的记录仍按数据卷持久化配置保留。
 
 ## 项目结构
 
@@ -225,3 +226,18 @@ data/                  上传素材、抽帧、数据库(已 gitignore)
 - 判读质量依赖知识库,而知识库是行为学通识的编码,不是诊断工具。涉及疼痛、疾病或持续性行为问题,请找执业兽医或行为专业人员。
 - 单张照片模式缺少时间维度和声音,信号不足的概率明显更高,这是方法本身的限制,不是 bug。
 - 运动强度的档位阈值(`video.py` 的 `_classify_intensity`)是按 320×180 灰度帧差定的,不同拍摄条件下基线会整体偏移,积累一批真实素材后建议重新标定。
+
+## 开源协作
+
+本项目采用 [MIT License](LICENSE)。参与开发请见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题请见 [SECURITY.md](SECURITY.md)。
+
+## 离线测试与部署边界
+
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q
+```
+
+测试使用临时数据库和模拟模型，不需要 API key。CI 不验证真实宠物判读质量。
+
+当前没有账户认证；`client_id` 只用于历史筛选，不是访问授权。记录详情和宠物档案等接口不能用于隔离不可信用户。默认监听所有网卡，请只在可信网络使用；公网部署前必须增加认证与访问控制。上传原件在任务结束后尽力删除，结果和反馈保留在数据库中。

@@ -8,16 +8,15 @@
 接口
 ----
 GET  /                      前端页面
-POST /analyze               multipart 上传 + SSE 推送进度与最终结果
+POST /analyze               multipart 上传，返回 job_id
+GET  /analyze/stream/{job_id} SSE 推送进度与最终结果
 GET  /history               历史记录
 GET  /record/{id}           单条记录详情
 POST /feedback/{record_id}  用户自评
 GET  /profiles, POST /profiles   宠物档案
 
-关于 SSE:EventSource 只能发 GET,没法带 multipart。这里让 POST /analyze 直接
-返回 ``text/event-stream``,前端用 fetch + ReadableStream 读。代价是没有
-EventSource 自带的断线重连——一次判读 20-30 秒,断了重传即可,不值得为此
-拆成"先 POST 拿 job_id 再 GET 订阅"两个接口。
+POST 创建后台任务并返回 job_id；GET /analyze/stream/{job_id}
+通过 EventSource 订阅进度，支持同一进程内的断线重连。
 """
 
 from __future__ import annotations

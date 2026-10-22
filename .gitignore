@@ -27,3 +27,10 @@ __pycache__/
 # --- 系统 ---
 .DS_Store
 Thumbs.db
+
+.env.*
+!.env.example
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/

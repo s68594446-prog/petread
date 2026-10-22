@@ -2,7 +2,7 @@
 
 设计约定
 --------
-* 知识库按 species 全量注入(暂不裁剪),``confidence`` / ``value_confidence``
+* 知识库按 species 加载并按模态裁剪,``confidence`` / ``value_confidence``
   标注原样保留,让模型知道哪些通道可以单独作为依据、哪些只能作佐证。
 * ``output_constraints`` 拼进 system prompt。
 * 视觉段与音频段只做"观察编码",禁止情绪结论;情绪候选只在融合段产生。
