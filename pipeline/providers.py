@@ -5,7 +5,7 @@
 * ``BaseProvider``          能力方法的抽象基类,不支持的能力返回统一的错误 dict。
 * ``OpenAICompatibleProvider``  text / vision / audio / video / omni,
   支持 text、image_url、video_url、input_audio 四种 content type。
-  当前主力 MiMo-V2.5 走这一条(type: openai)。
+  当前主力 MiMo-V2.6-Flash 走这一条(type: openai)。
 * ``DeepSeekProvider``      OpenAI 兼容的子类,备选
 * ``GeminiProvider``        audio,备选
 * ``MockProvider``          按 prompt.task 分派,生成对应 schema 的假数据
@@ -15,7 +15,7 @@
 * 所有公开调用只返回 dict,不抛异常。解析失败返回 ``{"error": ..., "raw": ...}``。
 * API key 只从环境变量读,config 里只写变量名。
 * 重试:指数退避,最多 ``max_retries`` 次;只对网络错误和 5xx 重试,4xx 不重试。
-* ``thinking`` / ``fps`` / ``media_resolution`` 按 extra_body 语义并入请求体顶层。
+* MiMo 的 thinking / max_completion_tokens 在顶层；fps / media_resolution 在视频 part。
 * base64 内联能力必须用 ``probe_base64_support`` 实测,不做静默降级。
 """
 
@@ -272,17 +272,39 @@ class ProviderConfig:
     knowledge_dir: str = ""
     # 鉴权头形式:bearer -> Authorization: Bearer xxx;api-key -> api-key: xxx
     auth_header: str = "bearer"
-    # 全模态相关。thinking / fps / media_resolution 由 extra_body 合并进请求体顶层。
+    # thinking / 输出上限在顶层；媒体参数位置按协议选择。
     thinking: bool | None = None
     fps: float | None = None
     media_resolution: str = ""
-    media_param_placement: str = "extra_body"   # extra_body | content
+    media_param_placement: str = "extra_body"   # extra_body | content | content_part
+    media_format: str = "openai"              # openai | mimo
+    max_completion_tokens: int | None = None
+
+    def __post_init__(self):
+        limit = self.max_completion_tokens
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= 131072):
+            raise ProviderConfigError("max_completion_tokens 必须是 1..131072 的整数")
+        if self.media_format not in ("openai", "mimo"):
+            raise ProviderConfigError("media_format 必须是 openai 或 mimo")
+        if self.media_param_placement not in ("extra_body", "content", "content_part"):
+            raise ProviderConfigError("未知 media_param_placement")
+        if self.media_format == "mimo":
+            if limit is None:
+                raise ProviderConfigError("MiMo 必须显式配置 max_completion_tokens")
+            if self.media_param_placement != "content_part":
+                raise ProviderConfigError("MiMo 视频参数必须使用 content_part")
+            if self.fps is not None and not 0.1 <= self.fps <= 10:
+                raise ProviderConfigError("MiMo fps 必须在 0.1..10")
+            if self.media_resolution not in ("", "default", "max"):
+                raise ProviderConfigError("MiMo media_resolution 必须是 default 或 max")
 
     def extra_body(self) -> dict:
         """按 OpenAI SDK 的 extra_body 语义,这些键直接并入请求体顶层。"""
         body: dict = {}
         if self.thinking is not None:
             body["thinking"] = {"type": "enabled" if self.thinking else "disabled"}
+        if self.max_completion_tokens is not None:
+            body["max_completion_tokens"] = self.max_completion_tokens
         if self.media_param_placement == "extra_body":
             if self.fps is not None:
                 body["fps"] = self.fps
@@ -291,8 +313,8 @@ class ProviderConfig:
         return body
 
     def media_params(self) -> dict:
-        """需要挂在 content 内部媒体对象上的参数(placement=content 时才非空)。"""
-        if self.media_param_placement != "content":
+        """媒体参数；content 放在媒体对象内，content_part 放在视频 part 上。"""
+        if self.media_param_placement not in ("content", "content_part"):
             return {}
         params: dict = {}
         if self.fps is not None:
@@ -363,6 +385,8 @@ def build_providers(config: dict) -> dict[str, "BaseProvider"]:
             media_param_placement=str(
                 raw.get("media_param_placement") or "extra_body"
             ).strip().lower(),
+            media_format=str(raw.get("media_format") or "openai").strip().lower(),
+            max_completion_tokens=raw.get("max_completion_tokens"),
         )
 
         if mock:
@@ -615,11 +639,15 @@ class OpenAICompatibleProvider(BaseProvider):
     def _extract_text(self, body: str) -> str:
         data = json.loads(body)
         self.last_usage = data.get("usage")
-        message = data["choices"][0]["message"]
+        choice = data["choices"][0]
+        reason = choice.get("finish_reason")
+        if reason != "stop" and (reason is not None or self.cfg.media_format == "mimo"):
+            raise ProviderError(f"模型输出未正常完成: {reason}")
+        message = choice["message"]
         content = message.get("content")
-        # thinking 模式下部分实现把推理过程放在 reasoning_content,正文仍在 content
+        # 推理内容不是最终判读；绝不能把它当作最终 JSON。
         if not content:
-            content = message.get("reasoning_content") or ""
+            raise ProviderError("模型未返回最终正文 content")
         return content
 
     # -- content part 构造 -------------------------------------------------
@@ -635,13 +663,21 @@ class OpenAICompatibleProvider(BaseProvider):
                 f"media_type 必须是 {MEDIA_TYPES} 之一,收到 '{media_type}'"
             )
 
+        def url_part(url: str) -> dict:
+            part = {"type": f"{media_type}_url", f"{media_type}_url": {"url": url}}
+            if self.cfg.media_param_placement == "content":
+                part[f"{media_type}_url"].update(self.cfg.media_params())
+            elif self.cfg.media_param_placement == "content_part" and media_type == "video":
+                part.update(self.cfg.media_params())
+            return part
+
         if _is_url(source):
             if media_type == "image":
-                return {"type": "image_url", "image_url": {"url": source,
-                                                           **self.cfg.media_params()}}
+                return url_part(source)
             if media_type == "video":
-                return {"type": "video_url", "video_url": {"url": source,
-                                                           **self.cfg.media_params()}}
+                return url_part(source)
+            if self.cfg.media_format == "mimo":
+                return {"type": "input_audio", "input_audio": {"data": source}}
             raise ProviderConfigError(
                 "input_audio 不接受 URL,音频必须以 base64 内联;请先把音频下载到本地。"
             )
@@ -657,18 +693,17 @@ class OpenAICompatibleProvider(BaseProvider):
         ext = os.path.splitext(source)[1].lower()
         if media_type == "image":
             mime = _IMAGE_MIME.get(ext, "image/jpeg")
-            return {
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{_read_b64(source)}",
-                              **self.cfg.media_params()},
-            }
+            return url_part(f"data:{mime};base64,{_read_b64(source)}")
         if media_type == "video":
             mime = _VIDEO_MIME.get(ext, "video/mp4")
-            return {
-                "type": "video_url",
-                "video_url": {"url": f"data:{mime};base64,{_read_b64(source)}",
-                              **self.cfg.media_params()},
-            }
+            return url_part(f"data:{mime};base64,{_read_b64(source)}")
+        if self.cfg.media_format == "mimo":
+            mime = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".flac": "audio/flac",
+                    ".m4a": "audio/mp4", ".ogg": "audio/ogg"}.get(ext)
+            if not mime:
+                raise ProviderConfigError("MiMo 音频请使用 WAV/MP3/FLAC/M4A/OGG，其他格式需先转换")
+            return {"type": "input_audio", "input_audio": {
+                "data": f"data:{mime};base64,{_read_b64(source)}"}}
         # audio:OpenAI 的 input_audio 约定是裸 base64 + format,不带 data: 前缀
         fmt = ext.lstrip(".") or "wav"
         return {
@@ -700,6 +735,7 @@ class OpenAICompatibleProvider(BaseProvider):
 
     def _chat(self, payload: dict) -> str:
         self.last_payload = payload
+        self.last_raw_text = None
         self.last_usage = None
         self.last_error_body = None
         started = time.time()
@@ -1551,3 +1587,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

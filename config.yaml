@@ -1,13 +1,16 @@
 # petread 模型调用层配置
 #
-# 当前主力:小米 MiMo-V2.5,全模态,OpenAI 协议兼容,一次调用完成视觉+声学+融合。
+# 当前主力:小米 MiMo-V2.6-Flash,一次调用完成视觉+声学+融合。
 # api_key 永远不写在这里,只写环境变量名,运行时从 os.environ 读取。
 
 providers:
 
   omni:
     type: openai                              # 复用 OpenAICompatibleProvider
-    model: "mimo-v2.5"
+    model: "mimo-v2.6-flash"
+    # 包括 reasoning + 正文；保留旧模型默认预算，避免新默认 131072。
+    max_completion_tokens: 32768
+    media_format: mimo                        # MiMo 音频 data URI、视频参数位置
     base_url: "https://api.xiaomimimo.com/v1"
     api_key_env: MIMO_API_KEY
 
@@ -16,14 +19,12 @@ providers:
     # 并打印最终生效的是哪种,据此把这里改成正确的值即可省掉后续的试探。
     auth_header: bearer                       # bearer | api-key
 
-    # --- 以下参数通过 extra_body 合并进请求体顶层 ---
+    # thinking 在顶层；fps / media_resolution 仅放在 video content part。
     thinking: true                            # -> extra_body {"thinking": {"type": "enabled"}}
     fps: 2                                    # 视频采样帧率,--mode native 时生效
     media_resolution: "default"
 
-    # fps / media_resolution 的投递位置。官方示例未明确,先按 extra_body 走。
-    # 若服务端报"未知参数",改成 content 让它们进 video_url 对象内部。
-    media_param_placement: extra_body         # extra_body | content
+    media_param_placement: content_part       # 与 video_url 同级，不在其内部
 
 # --- 备选:原三段式配置,MiMo 不可用时切回 ---
 # 切回时把下面三段取消注释,并把 pipeline 的调用改回 call_vision / call_audio / call_text。
@@ -63,3 +64,4 @@ confidence_floor: 0.5
 
 # 知识库目录,按 species 加载 <species>.yaml
 knowledge_dir: knowledge
+
