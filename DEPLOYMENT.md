@@ -1,6 +1,6 @@
 # PetRead Free deployment
 
-Release: `20261107-visual-v2.1-free`.
+Release: `20261107-visual-v2.1-free.1`.
 
 This release contains the yellow UI, official OpenAI adapter, durable device-scoped jobs,
 and the `petread.visual.v2.1` evidence contract. Two independent reliable channels
@@ -13,6 +13,8 @@ Deployment settings:
 - Mount remains `/data`; new records use `DATA_DIR=/data/petread-v2` to leave the legacy database untouched.
 - One worker and `PETREAD_MAX_ACTIVE_JOBS=1`.
 - `OPENAI_API_KEY` is configured only in Railway Variables; never in the repository or image.
+- `PETREAD_PUBLIC_ORIGIN=https://petread-production-bc55.up.railway.app` preserves
+  same-origin checks and Secure cookies/HSTS behind TLS termination without trusting client proxy headers.
 - Health probe: `/healthz`; readiness checks configuration, not paid model availability.
 - Video limit: 10 MiB, 15 seconds, 1080p, 30fps. Free memory capacity is not a quality or load guarantee.
 

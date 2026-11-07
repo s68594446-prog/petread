@@ -36,6 +36,7 @@ from contextvars import ContextVar
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -59,7 +60,7 @@ from pipeline.http_limits import BodyLimitMiddleware
 from pipeline.prompts import load_knowledge
 
 INDEX_HTML = os.path.join(PROJECT_ROOT, "index.html")
-RELEASE_ID = "20261107-visual-v2.1-free"
+RELEASE_ID = "20261107-visual-v2.1-free.1"
 # 上传目录跟随 store.DATA_DIR,由 DATA_DIR 环境变量统一控制。
 UPLOAD_DIR = os.path.join(store.DATA_DIR, "uploads")
 
@@ -152,6 +153,15 @@ def _client_id(value: str) -> str:
     return value
 
 
+def _secure_public_transport(request: Request) -> bool:
+    # Railway terminates TLS before ASGI. Trust only the operator-configured
+    # public origin, never arbitrary client Forwarded/X-Forwarded-* headers.
+    public_origin = urlsplit(os.environ.get("PETREAD_PUBLIC_ORIGIN", ""))
+    return request.url.scheme == "https" or (
+        public_origin.scheme == "https" and bool(public_origin.hostname)
+    )
+
+
 @app.middleware("http")
 async def security(request: Request, call_next):
     # Reject cross-origin browser mutations, even when a bearer header exists.
@@ -189,7 +199,7 @@ async def security(request: Request, call_next):
     })
     if request.method in {"GET", "HEAD"} and request.url.path.startswith("/assets/") and response.status_code == 200:
         response.headers["Cache-Control"] = "public, max-age=3600"
-    if request.url.scheme == "https":
+    if _secure_public_transport(request):
         response.headers["Strict-Transport-Security"] = "max-age=31536000"
     return response
 
@@ -210,7 +220,7 @@ def session(request: Request) -> JSONResponse:
                              **({"token": token} if token else {})})
     if token:
         response.set_cookie("petread_session", token, max_age=runtime.SESSION_SECONDS,
-                            httponly=True, secure=request.url.scheme == "https", samesite="strict")
+                            httponly=True, secure=_secure_public_transport(request), samesite="strict")
     return response
 
 

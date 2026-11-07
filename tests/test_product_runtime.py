@@ -64,6 +64,25 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.submit()).status_code, 403)
         analyze.assert_not_called()
 
+    async def test_tls_termination_uses_configured_origin_not_client_headers(self):
+        for origin, secure in (("", False), ("http://offline.test", False),
+                               ("https://public.test", True)):
+            with self.subTest(origin=origin), patch.dict("os.environ", {"PETREAD_PUBLIC_ORIGIN": origin}):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=server.app), base_url="http://offline.test",
+                    headers={"X-PetRead-Client": "web", "X-Forwarded-Proto": "https",
+                             "X-Forwarded-For": "203.0.113.1", "Origin": origin or "http://offline.test"},
+                ) as client:
+                    response = await client.post("/session")
+                    self.assertEqual(response.status_code, 200)
+                    cookie = list(client.cookies.jar)[0]
+                    self.assertEqual(cookie.secure, secure)
+                    self.assertIn("HttpOnly", cookie._rest)
+                    self.assertEqual(cookie._rest["SameSite"], "strict")
+                    self.assertEqual("strict-transport-security" in response.headers, secure)
+                    rejected = await client.post("/session", headers={"Origin": "https://evil.test"})
+                    self.assertEqual(rejected.status_code, 403)
+
     async def test_csrf_and_oversize_headers_rejected(self):
         self.assertEqual((await self.client.post("/consent", headers={"Origin":"https://evil.invalid"}, json={})).status_code,403)
         self.assertEqual((await self.client.post("/consent", headers={"X-PetRead-Client":""}, json={})).status_code,403)
