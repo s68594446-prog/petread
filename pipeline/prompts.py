@@ -25,6 +25,32 @@ DEFAULT_KNOWLEDGE_DIR = os.path.join(PROJECT_ROOT, "knowledge")
 
 CONFIDENCE_FLOOR = 0.5
 
+# Image-only policy. The shared knowledge files and audio payload are unchanged.
+IMAGE_EVIDENCE_RULE = (
+    "单图中至少两个独立且可靠的可观测通道、其中至少一个为体态或耳位主轴，"
+    "只是允许考虑状态候选的必要条件，不是充分条件；必须有对应知识库依据、"
+    "排查冲突并说明替代解释。证据多义或不足时保留字面观察并拒判，禁止为了"
+    "凑数量、减少拒判或达到置信度门槛而猜测。同一观察不得重复计数。"
+)
+_LEGACY_CHANNEL_RULE = "任何单一通道都不足以判定状态,至少需要三个通道一致。"
+
+# 纯音频输出契约独立版本化。Prompt 哈希仍记录完整模板版本；这个稳定标识
+# 让 provider、评估脚本和历史结果能明确区分字段语义。
+PURE_AUDIO_OUTPUT_CONTRACT_VERSION = "petread.pure_audio.v1.1"
+PURE_AUDIO_AROUSAL_VALUES = ("low", "moderate", "high", "unknown")
+PURE_AUDIO_VALENCE_VALUES = ("positive", "negative", "mixed", "unknown")
+PURE_AUDIO_STATE_LABELS = {
+    "general_vocalization": "一般性发声",
+    "contact_or_attention_related": "接触或关注相关",
+    "resource_anticipation_related": "资源期待相关",
+    "separation_or_reunion_related": "分离或重聚相关",
+    "defensive_or_aversive_related": "防御或厌恶相关",
+    "acute_distress_or_discomfort_possible": "急性不适可能",
+    "affiliative_or_comfort_possible": "舒适或亲和可能",
+    "mating_or_territorial_related": "繁殖或领地相关",
+    "uncertain": "无法确定",
+}
+
 # 所有 prompt 共用的输出格式要求
 JSON_ONLY_RULE = (
     "只输出一个 JSON 对象。不要用 markdown 代码块包裹,不要输出 ```json,"
@@ -164,6 +190,17 @@ def prune_knowledge(knowledge: dict, modality: str = "video") -> dict:
     pruned = {k: v for k, v in knowledge.items()
               if k in _ALWAYS_KEEP or k not in drop}
 
+    if modality == "image":
+        meta = dict(pruned.get("meta") or {})
+        meta["hard_constraints"] = [IMAGE_EVIDENCE_RULE if c == _LEGACY_CHANNEL_RULE else c
+                                    for c in meta.get("hard_constraints", [])]
+        scale = dict(meta.get("confidence_scale") or {})
+        if isinstance(scale.get("高"), str):
+            scale["高"] = scale["高"].replace(
+                "可单独作为判读依据", "表示信号可靠性，不表示单图状态证据充分")
+        meta["confidence_scale"] = scale
+        pruned["meta"] = meta
+
     pain = pruned.get("pain_indicators")
     if modality == "audio" and isinstance(pain, dict):
         pruned["pain_indicators"] = {k: v for k, v in pain.items()
@@ -197,10 +234,12 @@ def build_system_prompt(species: str, knowledge: dict, task: str,
         _dump_yaml(prune_knowledge(knowledge, modality)),
         "```",
         "",
-        CONFIDENCE_LEGEND,
+        (CONFIDENCE_LEGEND.replace("高 = 可单独作为判读依据",
+             "高 = 信号可靠性高，但单图仍须符合独立通道、主轴及充分性规则")
+         if modality == "image" else CONFIDENCE_LEGEND),
     ]
 
-    hard = _hard_constraints(knowledge)
+    hard = _hard_constraints(prune_knowledge(knowledge, modality))
     if hard:
         parts += ["", hard]
 
@@ -546,6 +585,35 @@ def fusion_prompt(
 # 4. 全模态单次调用(MiMo-V2.5 等原生多模态模型)
 # ---------------------------------------------------------------------------
 
+PURE_AUDIO_ASSESSMENT_SCHEMA = {
+    "contract_version": PURE_AUDIO_OUTPUT_CONTRACT_VERSION,
+    "arousal": {
+        "value": "low | moderate | high | unknown",
+        "reason": "只引用音量/能量、节律、重复率、频谱噪声与 pattern 匹配等声学事实",
+    },
+    "valence": {
+        "value": "positive | negative | mixed | unknown",
+        "reason": "说明声学证据为何足够或为何仍为 unknown；不得借场景猜测",
+    },
+    "confidence": {
+        "value": "0 到 0.70 的必填浮点数",
+        "base": "固定写 0.45",
+        "adjustments": [
+            {
+                "factor": "target_clear | pattern_match | repeated_consistency | low_masking | single_event | pattern_ambiguity | masking_noise | missing_context",
+                "delta": "只允许 -0.10 | -0.05 | 0.05 | 0.10",
+            }
+        ],
+        "reason": "逐项说明加减分；单次调用不得获得重复调用稳定性加分",
+    },
+    "possible_states": [f"受控 state_code，只能取：{list(PURE_AUDIO_STATE_LABELS)}"],
+    "alternative_explanations": ["受控 state_code；具体状态结论至少给一个不同的替代解释"],
+    "limitations": [
+        "no_visual_context | no_scene_context | single_event | background_masking | pattern_ambiguity | repeat_stability_unassessed"
+    ],
+}
+
+
 OMNI_SCHEMA = {
     "visual_signals": [
         {
@@ -640,6 +708,63 @@ OMNI_SCHEMA = {
     "translation": "一句话的拟人化表达",
     "suggestion": "主人现在可以做什么,一到三句",
 }
+
+
+def _pure_audio_contract_rules() -> str:
+    codes = "、".join(
+        f"{code}={label}" for code, label in PURE_AUDIO_STATE_LABELS.items()
+    )
+    return f"""【纯音频输出契约：{PURE_AUDIO_OUTPUT_CONTRACT_VERSION}】
+
+本节只在纯音频模式生效，并优先于通用候选规则：
+
+1. audio_events、timeline.audio、match_basis 与 evidence.observation 只能写可复核的声学事实：
+   时长、基频走向/范围、音节数、重复率、能量包络、宽带噪声、背景遮蔽和 pattern 匹配。
+   禁止把“请求、疼痛、亲和、恐惧、攻击、想吃东西”等意图或状态写进观察字段。
+
+2. audio_assessment 必须完整输出，contract_version 必须原样写
+   “{PURE_AUDIO_OUTPUT_CONTRACT_VERSION}”。arousal 只能取 {list(PURE_AUDIO_AROUSAL_VALUES)}；
+   valence 只能取 {list(PURE_AUDIO_VALENCE_VALUES)}。每个维度都必须写 reason：
+   - arousal 可根据能量、事件密度、重复率、突发性与噪声成分判定；证据不够写 unknown。
+   - valence 只有在知识库 pattern 与声学事实共同提供方向性证据时才写 positive/negative；
+     同时存在相反声学证据写 mixed；否则写 unknown。unknown 是有效答案，但必须解释缺什么。
+   - 不得根据用户场景、文件名或 CatMeows 场景标签反推任何维度。
+
+3. possible_states 与 alternative_explanations 只能使用以下固定 state_code：
+   {codes}
+   candidates 必须与 possible_states 一一对应：每个 candidate 增加 state_code，label 必须使用
+   上述固定中文标签。不得自创近义标签。除 general_vocalization 与 uncertain 外，只要输出具体
+   state_code，就必须在 alternative_explanations 中给出至少一个不同的受控 state_code。
+   - candidates 已经列出的第二、第三状态本身就是替代解释；不要再把同一个 code 重复写成唯一的
+     alternative_explanations。若只有一个具体 candidate，alternative_explanations 必须至少含一个
+     不同且未出现在 possible_states 的 code。
+   - 拍摄情境为空、未提供或 unavailable 时，contact_or_attention_related、
+     resource_anticipation_related、separation_or_reunion_related、mating_or_territorial_related
+     都不得出现在 possible_states/candidates；普通 meow 只能写 general_vocalization。
+     这些依赖场景的 code 只能作为 alternative_explanations，不能伪装成声学事实。
+
+4. confidence.value 必填并按以下规则计算，禁止省略、禁止凭感觉固定写 0.6：
+   - 从 base=0.45 开始；
+   - 目标物种发声清晰可分离 +0.10；pattern 匹配有中/高声学依据 +0.05；
+     同一素材内多个事件的声学结构一致 +0.05；背景遮蔽低 +0.05；
+   - 只有一个孤立事件 -0.05；pattern 间无法区分 -0.10；明显背景遮蔽 -0.10；
+     未提供可核实场景 -0.05；
+   - 每个实际使用的加减项都写进 adjustments，未命中不得写；最终截断到 0–0.70。
+   - 无画面时 limitations 必须包含 no_visual_context；单次调用必须包含
+     repeat_stability_unassessed，且不得获得“重复稳定”加分。跨调用稳定性只由外部评估计算。
+   - 拍摄情境为空、未提供或 unavailable 时，limitations 必须包含 no_scene_context，
+     并应用 missing_context=-0.05。
+   - candidate 最高 confidence 必须等于 audio_assessment.confidence.value。
+
+5. insufficient_evidence=true 时，candidates 必须为空，possible_states 只能是 ["uncertain"]；
+   confidence 仍必须输出。insufficient_evidence=false 时必须有至少一个受控候选。
+
+提交前逐项自检：
+- candidates 的 state_code 顺序与 possible_states 完全相同；
+- 单个具体 candidate 至少有一个不同的 alternative_explanations code；
+- 最高 candidate confidence 与 audio_assessment.confidence.value 完全相同；
+- match_basis 中没有请求、意图、情绪、疼痛、亲和、恐惧、攻击、关注或资源等推断词。
+"""
 
 
 def mimo_system_preamble(now: datetime | None = None) -> str:
@@ -830,49 +955,28 @@ def _sufficiency_rules(modality: str, knowledge: dict) -> str:
 
     if modality == "image":
         never = "\n".join(f"    · {c}" for c in _IMAGE_NEVER_COUNTED)
-        return f"""【单图的充分性判据 —— 按下面这一套执行,不要套用视频的门槛】
+        return f"""【单图证据规则：必要条件不等于充分条件】
+{IMAGE_EVIDENCE_RULE}
 
-**允许出候选的条件(满足即出,不要再加码):**
-  (a) {_IMAGE_AXIS_CHANNELS} 这两个主轴通道中**至少一个**可读;**且**
-  (b) 可观测通道总数 **≥ 2**。
-满足即正常输出 candidates(低置信度),**不得**判 insufficient_evidence。
-
-例:只有"耳位 + 体态"两个可读,其余全不可观测 —— 这是**充分**的,照常出候选。
-耳位与体态是行为学判读的主轴信号,它们可读时单张照片已经足以支撑一个低置信度判断。
-
-**(c) 画面命中 behavior_patterns 时同样满足出候选条件(与 (a)(b) 并列,任一满足即可):**
-画面里呈现的往往是一个**复合动作**(抱咬后腿踢、作揖邀玩、低伏摆臀),而 signals 编码的是
-**静态原子信号**。画面内容命中知识库 behavior_patterns 里某个 pattern 的 typical_phrases
-所描述的动作形态时:
-- **按该 pattern 的 candidates 并列给出候选**(不要硬选一个);
-- confidence **不得超过该 pattern 的 confidence_cap**,且同时不得超过单图上限 0.75,
-  两者取更小值;
-- 把该 pattern 的 distinguishing_signals 指向的通道写进 **missing_signals**,
-  说明补充它们才能在几个候选之间区分;
-- evidence 里 knowledge_basis 引用该 pattern 条目,channel 可写 "behavior_pattern"。
-- 此时**不得**判 insufficient_evidence:画面已呈现可映射的客观行为,缺的只是用于区分候选的
-  原子信号 —— 那是**降低置信度并写进 missing_signals** 的理由,不是拒绝判读的理由。
-- 注意单帧局限:静态画面可能无法确认动作的完整序列(如是否真有后腿踢、是否有摆尾蓄力),
-  不确定时应在 evidence 中写明,并让候选保持并列。
+先记录可见形态，再单独判断是否支持某个状态假设。体态和耳位均可读时，不能仅因
+没有第三通道而拒判；但也不能仅因有两个或三个通道就强制输出状态。
+只有明确观察、对应知识库依据、交叉支持且无未解决的实质冲突，才允许低置信候选。
+如体态可见但耳基、张力或区分状态的必要场景不明，保留事实并说明具体缺口。
+单图不证明持续动作；behavior_patterns 只是待核对的解释，不能绕过目标、画质、
+主轴及独立证据条件。外观相似不等于动作序列成立，缺失动作不能补全。
+毛色、画面位置不是状态证据；同一观察的不同措辞、同一身体部位的重复描述不算
+独立通道。每个候选至少引用两个不同可靠通道（中/高），其中一个为可编码主轴。
+替代解释未被排除时必须说明；无法支持任何具体假设时 candidates=[]、
+insufficient_evidence=true，insufficient_reason 写实质缺口，不写虚构的数量规则。
 
 {_pain_block(modality, knowledge)}
 
 **永不计入分母的通道**(读不到是素材类型使然,不是证据不足):
 {never}
-  这些通道写 "不可观测" 即可。**读不到不扣分;读到了则计入 (b) 的可观测总数(加分项)。**
-
-**insufficient_evidence 只在下列情况为 true:**
-- 画面中没有目标物种;
-- 个体严重模糊 / 过曝 / 欠曝到读不出形态;
-- 主体被完全遮挡,主轴通道(体态、耳位)一个都读不出,**且**画面也未命中任何 behavior_pattern;
-- 可观测通道总数 < 2,**且**画面未命中任何 behavior_pattern;
-- 所有候选的 confidence 都低于 0.5。
-除此之外**不得**以"只有一张照片""缺少时间维度""通道数偏少"为由判证据不足。
-
-**置信度校准:** 静态素材无法区分"瞬间姿态"与"持续状态",也看不到变化方向。
-单图 confidence **上限 0.75**;仅靠两个主轴通道出的候选建议落在 **0.5–0.65**。
-在 evidence 中如实写明该局限,但这是**降低置信度**的理由,不是**拒绝判读**的理由。
-结论只描述该瞬间的状态,不要推断此前或此后会发生什么。"""
+这些不可用信息不能编造或通过重复描述补齐。
+目标缺失/不唯一、画质不足、可靠主轴缺失、证据不足或存在未解决实质冲突时拒判。
+confidence 是未校准估计，仍须在 0.5–0.75 内；低于 0.5 则不出候选，禁止自动加分。
+结论只描述该瞬间可能的解释，不断言内心、意图或此前此后的行为。"""
 
     if modality == "audio":
         return """insufficient_evidence 必须为 true(且 candidates 置空、insufficient_reason 必填)当:
@@ -938,6 +1042,7 @@ def omni_prompt(
     media_hint: str = "",
     now: datetime | None = None,
     modality: str = "video",
+    contract_feedback: tuple[str, ...] = (),
 ) -> Prompt:
     """全模态单次调用:视觉编码 + 声学编码 + 时序对齐 + 规则裁决 + 候选输出。
 
@@ -969,6 +1074,25 @@ def omni_prompt(
             continue
 
     absent = _STRUCTURALLY_ABSENT.get(modality, _STRUCTURALLY_ABSENT["video"])
+    output_schema = dict(OMNI_SCHEMA)
+    pure_audio_contract = ""
+    contract_feedback_block = ""
+    if modality == "audio":
+        candidate_schema = dict(output_schema["candidates"][0])
+        candidate_schema = {
+            "state_code": f"受控 state_code，只能取：{list(PURE_AUDIO_STATE_LABELS)}",
+            **candidate_schema,
+        }
+        output_schema["candidates"] = [candidate_schema]
+        output_schema["audio_assessment"] = PURE_AUDIO_ASSESSMENT_SCHEMA
+        pure_audio_contract = _pure_audio_contract_rules()
+        feedback = [str(item).strip()[:300] for item in contract_feedback if str(item).strip()]
+        if feedback:
+            contract_feedback_block = (
+                "【上一次输出的契约错误——本次必须逐条修正】\n- "
+                + "\n- ".join(feedback[:8])
+                + "\n只修正这些契约问题；不得因此编造新的声学观察或提高置信度。"
+            )
     modality_label = {"video": "视频(含音轨)", "image": "单张静态照片",
                       "audio": "纯音频(无画面)",
                       "text": "文字描述(无媒体)"}.get(modality, modality)
@@ -1014,15 +1138,9 @@ timeline 中的 visual 字段一律写 null。这不是信息缺失,是素材类
 - 每个取值同时给出它在知识库里的 value_confidence 等级。
 - 每条记录必须带时间戳 t。
 {f"- 本次素材中以下通道属于结构性不可观测,写 “不可观测” 即可,不必勉强判读:{absent['channels']}。{absent['note']}" if absent["channels"] else ""}
-{'''- **重点读主轴:** 优先把 body_posture(整体重心与肌肉张力)和 ear_position 读准,
-  这两个是判读主轴,单帧里通常都能读到。其余通道读不到就写 "不可观测",不必勉强,
-  也不要因为它们读不到就认为整体证据不足 —— 充分性判据见第五步。
-- **除了映射到 signals 编码表,也要把画面里的复合动作匹配到知识库的 behavior_patterns。**
-  画面里常常是一个**动作**(抱咬后腿踢、作揖邀玩、低伏摆臀),而 signals 里只有**静态原子信号**,
-  直接找不到落点 —— 这时**不要**因为通道对不上就全标 "不可观测"。
-  命中某个 pattern 时:按其 candidates **并列**给出低置信度候选(confidence 取该 pattern 的
-  confidence_cap 与单图上限 0.75 中的较小值),并把其 distinguishing_signals 指向的通道
-  逐条列进 missing_signals。命中 pattern 即已具备判读基础,**不得**据此判证据不足。''' if modality == "image" else ""}
+{'''- 优先核对体态和耳位，但不假定主轴必定可读。身体可见而张力不明时，保留可见形态。
+- behavior_patterns 只是待核对解释；静态外观不证明连续动作。是否出候选统一按第五步
+  处理，不能仅凭模式相似就强制输出，也不能把同一形态重复算作多个通道。''' if modality == "image" else ""}
 {_pain_read_instruction(modality, knowledge)}{_temporal_read_instruction(modality, knowledge)}"""
 
     if modality == "text":
@@ -1104,6 +1222,10 @@ candidates:
 - 低置信度(低)的信号不得单独支撑一个候选,至少要有一条中或高置信度证据。
 - 候选可以为空数组。
 
+{pure_audio_contract}
+
+{contract_feedback_block}
+
 {_sufficiency_rules(modality, knowledge)}
 
 证据不足是合法且有价值的结论。禁止为了给出答案而降低标准、拼凑证据或提高置信度。
@@ -1145,12 +1267,12 @@ suggestion(违反任意一条即为错误输出):
 
 ════════ 全局禁止事项 ════════
 - 第一、二步只做形态与声学编码,其中禁止出现任何情绪词。情绪只允许出现在
-  candidates 的 label、translation 和 suggestion 中。
+  candidates 的 label、translation 和 suggestion 中{("，以及纯音频 audio_assessment 的 arousal/valence 中" if modality == "audio" else "")}。
 - 禁止引入知识库之外的行为学主张,禁止编造文献、作者或年份。
 - 禁止为了填满字段而猜测:看不清就是 "不可观测",这不是失败。
 
 【输出 JSON 结构】(字段说明仅为解释用途,实际输出填真实值)
-{_dump_json(OMNI_SCHEMA)}
+{_dump_json(output_schema)}
 
 {JSON_ONLY_RULE}"""
 
@@ -1160,7 +1282,15 @@ suggestion(违反任意一条即为错误输出):
         species=species,
         task="omni",
         meta={"channels": channels, "patterns": patterns,
-              "warning_signals": warning_signals},
+              "warning_signals": warning_signals,
+              "contract_feedback_count": len(contract_feedback),
+              "context_available": bool(
+                  str(context or "").strip()
+                  and str(context or "").strip().lower() not in {"unavailable", "unknown", "未提供"}
+              ),
+              "output_contract": (
+                  PURE_AUDIO_OUTPUT_CONTRACT_VERSION if modality == "audio" else None
+              )},
     )
 
 

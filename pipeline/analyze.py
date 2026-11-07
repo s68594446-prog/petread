@@ -44,6 +44,8 @@ def analyze(
     max_frames: int = 8,
     text_description: str = "",
     progress: Progress | None = None,
+    evaluation_mode: bool = False,
+    evaluation_contract_feedback: list[str] | None = None,
 ) -> dict:
     """执行一次判读。
 
@@ -53,6 +55,14 @@ def analyze(
 
     ``text_description`` 仅在 ``mode == "text"`` 时使用,此时不需要 ``media_path``。
     """
+    if evaluation_mode and os.environ.get("PETREAD_EVALUATION_MODE") != "1":
+        raise RuntimeError(
+            "evaluation_mode 需要显式设置 PETREAD_EVALUATION_MODE=1；"
+            "评估脚本必须在导入 pipeline 前隔离 DATA_DIR。"
+        )
+    if evaluation_contract_feedback and (not evaluation_mode or mode != "audio"):
+        raise RuntimeError("契约错误反馈只允许用于 evaluation_mode 的纯音频重试")
+
     report = progress or _noop
     if mode not in MODES:
         raise ValueError(f"mode 必须是 {MODES} 之一,收到 '{mode}'")
@@ -65,7 +75,10 @@ def analyze(
     elif mode == "quick":
         out = _run_quick(media_path, species, context, provider, knowledge, report)
     elif mode == "audio":
-        out = _run_audio(media_path, species, context, provider, knowledge, report)
+        out = _run_audio(
+            media_path, species, context, provider, knowledge, report,
+            contract_feedback=evaluation_contract_feedback,
+        )
     elif mode == "native":
         out = _run_native(media_path, species, context, provider, knowledge, report)
     else:
@@ -80,6 +93,7 @@ def analyze(
         "latency_s": round(time.time() - started, 2),
         "provider": provider.name,
         "model": provider.cfg.model,
+        "evaluation_mode": bool(evaluation_mode),
     })
     return out
 
@@ -151,7 +165,8 @@ def _run_text(text_description, species, context, provider, knowledge, report) -
     return _finish(provider, result, motion)
 
 
-def _run_audio(media_path, species, context, provider, knowledge, report) -> dict:
+def _run_audio(media_path, species, context, provider, knowledge, report,
+               contract_feedback: list[str] | None = None) -> dict:
     """纯音频:只做声学分析,visual_signals 留空。"""
     motion = {
         "duration": None,
@@ -164,7 +179,8 @@ def _run_audio(media_path, species, context, provider, knowledge, report) -> dic
     hint = ("一段纯音频,没有任何画面。只做声学事件的切分、描述与模式匹配,"
             "visual_signals 输出空数组,timeline 的 visual 字段一律写 null。")
     prompt = prompts_mod.omni_prompt(species, context, knowledge, motion,
-                                     media_hint=hint, modality="audio")
+                                     media_hint=hint, modality="audio",
+                                     contract_feedback=tuple(contract_feedback or ()))
 
     report("model", 30, "声学分析中…")
     result = provider.call_omni(media_path, "audio", prompt)

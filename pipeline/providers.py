@@ -63,6 +63,10 @@ class ProviderNetworkError(ProviderError):
     """连接失败、超时、DNS 等传输层错误,可重试。"""
 
 
+class ProviderTimeoutError(ProviderNetworkError):
+    """传输层超时；与其他连接错误分开记录。"""
+
+
 class ProviderHTTPError(ProviderError):
     """HTTP 非 2xx。5xx 可重试,4xx 不可。"""
 
@@ -124,20 +128,63 @@ def _extract_outermost_object(text: str) -> str | None:
     return None
 
 
-def parse_json_response(text: str) -> dict:
+def _remove_trailing_commas(text: str) -> str:
+    """移除 JSON 对象/数组闭合符前的尾逗号，不改动字符串内部内容。"""
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < len(text) and text[j].isspace():
+                j += 1
+            if j < len(text) and text[j] in "}]":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def parse_json_response(text: str | None) -> dict:
     """把模型返回的文本解析成 dict。失败时返回 ``{"error", "raw"}``。"""
-    if text is None:
-        return {"error": "模型返回为空", "raw": ""}
+    if text is None or (isinstance(text, str) and not text.strip()):
+        return {
+            "error": "模型返回为空",
+            "raw": text,
+            "_error_kind": "empty_response",
+        }
     if isinstance(text, dict):
         return text
 
     raw = str(text)
-    candidates = [_strip_fences(raw), raw]
-    extracted = _extract_outermost_object(_strip_fences(raw))
+    stripped = _strip_fences(raw)
+    candidates: list[tuple[str, str | None]] = [(stripped, None), (raw, None)]
+    extracted = _extract_outermost_object(stripped)
     if extracted:
-        candidates.insert(0, extracted)
+        candidates.append((extracted, None))
+    repaired = _remove_trailing_commas(extracted or stripped)
+    if repaired and repaired != (extracted or stripped):
+        candidates.append((repaired, "removed_trailing_commas"))
 
-    for cand in candidates:
+    for cand, repair in candidates:
         if not cand:
             continue
         try:
@@ -145,10 +192,249 @@ def parse_json_response(text: str) -> dict:
         except (json.JSONDecodeError, ValueError):
             continue
         if isinstance(parsed, dict):
+            reserved = [key for key in parsed if key == "error" or key.startswith("_")]
+            if reserved:
+                return _contract_error({}, [f"模型输出不得包含保留字段 {sorted(reserved)}"], raw)
+            if repair:
+                parsed.setdefault("_json_repair", repair)
             return parsed
-        return {"error": f"模型返回的是 {type(parsed).__name__},不是 JSON 对象", "raw": raw}
+        return _contract_error({}, [f"JSON 顶层必须为对象，收到 {type(parsed).__name__}"], raw)
 
-    return {"error": "无法解析为 JSON", "raw": raw}
+    return {
+        "error": "无法解析为 JSON",
+        "raw": raw,
+        "_error_kind": "json_syntax_error",
+    }
+
+
+def _contract_error(result: dict, errors: list[str], raw: str | None = None) -> dict:
+    meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else {}
+    return {
+        "error": "纯音频输出契约校验失败: " + "; ".join(errors),
+        "raw": raw,
+        "_error_kind": "contract_error",
+        "_meta": dict(meta),
+        "_contract_errors": errors,
+    }
+
+
+_PURE_AUDIO_OBSERVATION_FORBIDDEN_TERMS = (
+    "请求", "意图", "情绪", "疼痛", "不适", "亲和", "恐惧", "攻击",
+    "关注", "资源", "想吃", "唤醒", "对人", "分离", "重聚", "领地", "繁殖",
+)
+_PURE_AUDIO_CONTEXT_REQUIRED_STATES = {
+    "contact_or_attention_related",
+    "resource_anticipation_related",
+    "separation_or_reunion_related",
+    "mating_or_territorial_related",
+}
+
+
+def _pure_audio_observation_errors(result: dict) -> list[str]:
+    """观察层只能保留声学事实；返回精确路径供评估重试反馈。"""
+    errors: list[str] = []
+    for index, event in enumerate(result.get("audio_events") or []):
+        if not isinstance(event, dict):
+            continue
+        basis = str(event.get("match_basis") or "")
+        hits = [term for term in _PURE_AUDIO_OBSERVATION_FORBIDDEN_TERMS if term in basis]
+        if hits:
+            errors.append(
+                f"audio_events[{index}].match_basis 含推断词 {hits}；只能写声学事实"
+            )
+    return errors
+
+
+def validate_pure_audio_contract(result: dict, raw: str | None = None) -> dict:
+    """校验并做有界类型修复；语义缺失或越界一律 fail closed。"""
+    if not isinstance(result, dict) or result.get("error"):
+        return result
+    assessment = result.get("audio_assessment")
+    if not isinstance(assessment, dict):
+        return _contract_error(result, ["缺少 audio_assessment 对象"], raw)
+
+    errors: list[str] = []
+    repairs: list[str] = []
+    expected = prompts_mod.PURE_AUDIO_OUTPUT_CONTRACT_VERSION
+    if assessment.get("contract_version") != expected:
+        errors.append(f"contract_version 必须为 {expected}")
+
+    for key, allowed in (
+        ("arousal", prompts_mod.PURE_AUDIO_AROUSAL_VALUES),
+        ("valence", prompts_mod.PURE_AUDIO_VALENCE_VALUES),
+    ):
+        node = assessment.get(key)
+        if not isinstance(node, dict):
+            errors.append(f"{key} 必须为对象")
+            continue
+        value = str(node.get("value") or "").strip().lower()
+        if value not in allowed:
+            errors.append(f"{key}.value 不在固定枚举中")
+        else:
+            node["value"] = value
+        if not str(node.get("reason") or "").strip():
+            errors.append(f"{key}.reason 不能为空")
+
+    confidence = assessment.get("confidence")
+    if not isinstance(confidence, dict):
+        errors.append("confidence 必须为对象")
+        confidence = {}
+    value = confidence.get("value")
+    if isinstance(value, str):
+        try:
+            confidence["value"] = float(value)
+            value = confidence["value"]
+            repairs.append("confidence_string_to_float")
+        except ValueError:
+            pass
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        errors.append("confidence.value 必须为数值")
+    elif not 0 <= float(value) <= 0.70:
+        errors.append("confidence.value 必须在 0 到 0.70")
+    if not isinstance(confidence.get("adjustments"), list):
+        errors.append("confidence.adjustments 必须为数组")
+    if not str(confidence.get("reason") or "").strip():
+        errors.append("confidence.reason 不能为空")
+
+    allowed_states = prompts_mod.PURE_AUDIO_STATE_LABELS
+    states = assessment.get("possible_states")
+    alternatives = assessment.get("alternative_explanations")
+    if not isinstance(states, list) or not states:
+        errors.append("possible_states 必须为非空数组")
+        states = []
+    if not isinstance(alternatives, list):
+        errors.append("alternative_explanations 必须为数组")
+        alternatives = []
+    if any(state not in allowed_states for state in states):
+        errors.append("possible_states 含未受控 state_code")
+    if any(state not in allowed_states for state in alternatives):
+        errors.append("alternative_explanations 含未受控 state_code")
+    if len(states) != len(set(states)) or len(alternatives) != len(set(alternatives)):
+        errors.append("state_code 数组不得重复")
+
+    limitations = assessment.get("limitations")
+    if not isinstance(limitations, list):
+        errors.append("limitations 必须为数组")
+        limitations = []
+    for required in ("no_visual_context", "repeat_stability_unassessed"):
+        if required not in limitations:
+            errors.append(f"limitations 缺少 {required}")
+
+    candidates = result.get("candidates")
+    candidates = candidates if isinstance(candidates, list) else []
+    insufficient = bool(result.get("insufficient_evidence"))
+    candidate_codes: list[str] = []
+    candidate_confidences: list[float] = []
+    if not insufficient:
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            code = candidate.get("state_code")
+            candidate_codes.append(code)
+            try:
+                numeric_confidence = float(candidate.get("confidence"))
+                candidate_confidences.append(numeric_confidence)
+                if isinstance(candidate.get("confidence"), str):
+                    candidate["confidence"] = numeric_confidence
+                    repairs.append("candidate_confidence_string_to_float")
+            except (TypeError, ValueError):
+                pass
+
+        # possible_states 是 candidates 的重复机器字段。仅当候选全部包含在原 states 中，
+        # 且被移除的多余 state 已明确列为 alternative 时，才做语义不变的顺序规范化。
+        if (
+            candidate_codes
+            and candidate_codes != states
+            and len(candidate_codes) == len(set(candidate_codes))
+            and all(code in allowed_states and code in states for code in candidate_codes)
+            and all(state in candidate_codes or state in alternatives for state in states)
+        ):
+            states = list(candidate_codes)
+            assessment["possible_states"] = states
+            repairs.append("possible_states_synced_to_candidates")
+    if insufficient:
+        if candidates:
+            errors.append("证据不足时 candidates 必须为空")
+        if states != ["uncertain"]:
+            errors.append('证据不足时 possible_states 必须为 ["uncertain"]')
+    else:
+        if not candidates:
+            errors.append("证据充分时 candidates 不能为空")
+        candidate_codes = []
+        candidate_confidences = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                errors.append("candidate 必须为对象")
+                continue
+            code = candidate.get("state_code")
+            candidate_codes.append(code)
+            if code not in allowed_states:
+                errors.append("candidate.state_code 不在固定枚举中")
+                continue
+            if candidate.get("label") != allowed_states[code]:
+                errors.append(f"candidate.label 与 state_code {code} 不一致")
+            try:
+                numeric_confidence = float(candidate.get("confidence"))
+                candidate_confidences.append(numeric_confidence)
+                if isinstance(candidate.get("confidence"), str):
+                    candidate["confidence"] = numeric_confidence
+                    repairs.append("candidate_confidence_string_to_float")
+            except (TypeError, ValueError):
+                errors.append("candidate.confidence 必须为数值")
+        if candidate_codes != states:
+            errors.append("candidates 顺序必须与 possible_states 一致")
+        concrete = [s for s in states if s not in ("general_vocalization", "uncertain")]
+        has_distinct_candidate = len(candidate_codes) > 1
+        has_distinct_listed_alternative = any(a not in candidate_codes for a in alternatives)
+        if concrete and not (has_distinct_candidate or has_distinct_listed_alternative):
+            errors.append("具体状态结论必须提供不同的受控替代解释")
+        if candidate_confidences and isinstance(value, (int, float)):
+            if abs(max(candidate_confidences) - float(value)) > 0.001:
+                if len(candidates) == 1 and float(value) >= DEFAULT_CONFIDENCE_FLOOR:
+                    candidates[0]["confidence"] = float(value)
+                    repairs.append("single_candidate_confidence_synced_to_assessment")
+                else:
+                    errors.append("最高 candidate confidence 必须等于 audio_assessment confidence")
+
+    errors.extend(_pure_audio_observation_errors(result))
+
+    if errors:
+        return _contract_error(result, errors, raw)
+    if repairs:
+        result.setdefault("_contract_repairs", []).extend(repairs)
+    return result
+
+
+def validate_output_contract(
+    result: dict,
+    prompt: Prompt | str,
+    raw: str | None = None,
+) -> dict:
+    # 传输、空响应和 JSON 语法错误都没有可供语义契约校验的模型对象。
+    # 保留原始错误类型，且绝不为它们制造 _contract_errors。
+    if not isinstance(result, dict) or result.get("error"):
+        return result
+    contract = prompt.meta.get("output_contract") if isinstance(prompt, Prompt) else None
+    if not contract:
+        return result
+    if contract == prompts_mod.PURE_AUDIO_OUTPUT_CONTRACT_VERSION:
+        checked = validate_pure_audio_contract(result, raw)
+        if not isinstance(prompt, Prompt):
+            return checked
+        errors = list(checked.get("_contract_errors") or [])
+        assessment = result.get("audio_assessment")
+        assessment = assessment if isinstance(assessment, dict) else {}
+        limitations = assessment.get("limitations") or []
+        if not prompt.meta.get("context_available") and "no_scene_context" not in limitations:
+            errors.append("未提供场景时 limitations 缺少 no_scene_context")
+        states = assessment.get("possible_states") or []
+        forbidden = sorted(_PURE_AUDIO_CONTEXT_REQUIRED_STATES.intersection(states))
+        if not prompt.meta.get("context_available") and forbidden:
+            errors.append(f"未提供场景时 possible_states 不得包含依赖情境的状态 {forbidden}")
+        if errors:
+            return _contract_error(result, list(dict.fromkeys(errors)), raw)
+        return checked
+    return _contract_error(result, [f"未知输出契约 {contract}"], raw)
 
 
 def filter_low_confidence(result: dict, floor: float = DEFAULT_CONFIDENCE_FLOOR) -> dict:
@@ -277,6 +563,10 @@ class ProviderConfig:
     fps: float | None = None
     media_resolution: str = ""
     media_param_placement: str = "extra_body"   # extra_body | content
+    audio_model: str = ""
+    max_output_tokens: int = 8192
+    reasoning_effort: str = "low"
+    max_media_seconds: int = 30
 
     def extra_body(self) -> dict:
         """按 OpenAI SDK 的 extra_body 语义,这些键直接并入请求体顶层。"""
@@ -355,6 +645,10 @@ def build_providers(config: dict) -> dict[str, "BaseProvider"]:
             ),
             mock=mock,
             role=role,
+            audio_model=str(raw.get("audio_model") or ""),
+            max_output_tokens=int(raw.get("max_output_tokens", 8192)),
+            reasoning_effort=str(raw.get("reasoning_effort") or "low"),
+            max_media_seconds=int(raw.get("max_media_seconds", 30)),
             knowledge_dir=knowledge_dir,
             auth_header=str(raw.get("auth_header") or "bearer").strip().lower(),
             thinking=None if thinking is None else bool(thinking),
@@ -369,7 +663,11 @@ def build_providers(config: dict) -> dict[str, "BaseProvider"]:
             built[role] = MockProvider(cfg)
             continue
 
-        cls = PROVIDER_REGISTRY.get(ptype)
+        if ptype == "openai_native":
+            from .openai_provider import OpenAINativeProvider
+            cls = OpenAINativeProvider
+        else:
+            cls = PROVIDER_REGISTRY.get(ptype)
         if cls is None:
             raise ProviderConfigError(
                 f"{role} 的 provider 类型 '{ptype}' 未注册;"
@@ -408,6 +706,10 @@ def _post_json(url: str, payload: dict, headers: dict, timeout: float) -> str:
             pass
         raise ProviderHTTPError(exc.code, detail) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        reason = getattr(exc, "reason", None)
+        detail = f"{exc} {reason or ''}".lower()
+        if isinstance(exc, TimeoutError) or "timed out" in detail or "timeout" in detail:
+            raise ProviderTimeoutError(str(exc)) from exc
         raise ProviderNetworkError(str(exc)) from exc
 
 
@@ -441,7 +743,8 @@ class BaseProvider(ABC):
         return {
             "error": f"provider '{self.name}' 不支持 {capability} 能力;"
                      f"它支持 {list(self.supports)}",
-            "raw": "",
+            "raw": None,
+            "_error_kind": "runner_or_internal_error",
             "_meta": {"provider": self.name, "capability": capability},
         }
 
@@ -496,25 +799,68 @@ class BaseProvider(ABC):
                 delay = min(self.cfg.backoff_base * (2 ** (attempt - 1)), MAX_BACKOFF)
                 time.sleep(delay + random.uniform(0, delay * 0.3))
 
-        raise last_exc or ProviderError("调用失败但没有捕获到具体异常")
+        final_exc = last_exc or ProviderError("调用失败但没有捕获到具体异常")
+        try:
+            setattr(final_exc, "attempts", attempts)
+        except Exception:
+            pass
+        raise final_exc
 
     def _run(self, fn: Callable[[], str], label: str, *, floor: float | None = None) -> dict:
         """统一出口:执行 -> 解析 -> 过滤低置信度候选,任何失败都落成 error dict。"""
         try:
             text, meta = self._with_retry(fn, label)
+        except ProviderTimeoutError as exc:
+            return {
+                "error": f"{type(exc).__name__}: {exc}",
+                "raw": getattr(self, "last_raw_text", None),
+                "_error_kind": "transport_timeout",
+                "_meta": {
+                    "provider": self.name,
+                    "model": self.cfg.model,
+                    "capability": label,
+                    "attempts": getattr(exc, "attempts", None),
+                    "response_received": getattr(self, "last_response_received", False),
+                },
+            }
+        except (ProviderNetworkError, ProviderHTTPError) as exc:
+            return {
+                "error": f"{type(exc).__name__}: {exc}",
+                "raw": getattr(self, "last_raw_text", None),
+                "_error_kind": "transport_error",
+                "_meta": {
+                    "provider": self.name,
+                    "model": self.cfg.model,
+                    "capability": label,
+                    "attempts": getattr(exc, "attempts", None),
+                    "response_received": getattr(self, "last_response_received", False),
+                },
+            }
         except ProviderError as exc:
             return {
                 "error": f"{type(exc).__name__}: {exc}",
-                "raw": getattr(exc, "body", "") or "",
-                "_meta": {"provider": self.name, "model": self.cfg.model,
-                          "capability": label},
+                "raw": getattr(self, "last_raw_text", None),
+                "_error_kind": "runner_or_internal_error",
+                "_meta": {
+                    "provider": self.name,
+                    "model": self.cfg.model,
+                    "capability": label,
+                    "attempts": getattr(exc, "attempts", None),
+                    "response_received": getattr(self, "last_response_received", False),
+                },
             }
         except Exception as exc:
             return {
                 "error": f"未预期的错误 {type(exc).__name__}: {exc}",
-                "raw": "",
-                "_meta": {"provider": self.name, "model": self.cfg.model,
-                          "capability": label},
+                "raw": getattr(self, "last_raw_text", None),
+                "_error_kind": "runner_or_internal_error",
+                "_meta": {
+                    "provider": self.name,
+                    "model": self.cfg.model,
+                    "capability": label,
+                    "attempts": None,
+                    "response_received": getattr(self, "last_response_received", False),
+                },
             }
 
         result = parse_json_response(text)
@@ -587,6 +933,10 @@ class OpenAICompatibleProvider(BaseProvider):
         self.last_usage: dict | None = None
         self.last_latency: float | None = None
         self.last_error_body: str | None = None
+        self.last_request_started = False
+        self.last_response_received = False
+        self.last_http_attempts = 0
+        self.disable_auth_fallback = False
         # 实际被服务端接受的鉴权头形式,首次成功调用后确定
         self.effective_auth_header: str | None = None
         self._auth_fallback_announced = False
@@ -700,16 +1050,24 @@ class OpenAICompatibleProvider(BaseProvider):
 
     def _chat(self, payload: dict) -> str:
         self.last_payload = payload
+        self.last_raw_text = None
         self.last_usage = None
+        self.last_latency = None
         self.last_error_body = None
+        self.last_request_started = False
+        self.last_response_received = False
+        self.last_http_attempts = 0
         started = time.time()
 
         style = (self.effective_auth_header or self.cfg.auth_header or "bearer").lower()
         try:
+            self.last_request_started = True
+            self.last_http_attempts += 1
             body = _post_json(self.endpoint, payload,
                               self._headers(style), self.cfg.timeout)
+            self.last_response_received = True
         except ProviderHTTPError as exc:
-            if exc.status != 401:
+            if exc.status != 401 or self.disable_auth_fallback:
                 self.last_error_body = exc.body
                 self.last_latency = round(time.time() - started, 3)
                 raise
@@ -717,8 +1075,14 @@ class OpenAICompatibleProvider(BaseProvider):
             alt = self._other_auth_style(style)
             print(f"[auth] {style} 形式返回 401,改用 {alt} 形式重试一次 ...")
             try:
+                self.last_request_started = True
+                self.last_http_attempts += 1
                 body = _post_json(self.endpoint, payload,
                                   self._headers(alt), self.cfg.timeout)
+                self.last_response_received = True
+            except ProviderNetworkError:
+                self.last_latency = round(time.time() - started, 3)
+                raise
             except ProviderHTTPError as exc2:
                 self.last_error_body = exc2.body
                 self.last_latency = round(time.time() - started, 3)
@@ -730,6 +1094,9 @@ class OpenAICompatibleProvider(BaseProvider):
             print(f"[auth] 生效的鉴权头形式: {alt}"
                   f"(可把 config.yaml 的 auth_header 改成 {alt} 省掉这次试探)")
             self._auth_fallback_announced = True
+        except ProviderNetworkError:
+            self.last_latency = round(time.time() - started, 3)
+            raise
         else:
             if self.effective_auth_header is None:
                 self.effective_auth_header = style
@@ -793,13 +1160,15 @@ class OpenAICompatibleProvider(BaseProvider):
         except ProviderConfigError as exc:
             return {
                 "error": f"ProviderConfigError: {exc}",
-                "raw": "",
+                "raw": None,
+                "_error_kind": "runner_or_internal_error",
                 "_meta": {"provider": self.name, "model": self.cfg.model,
                           "capability": capability},
             }
 
-        return self._run(lambda: self._chat(self._build_payload(system, content)),
-                         capability)
+        result = self._run(lambda: self._chat(self._build_payload(system, content)),
+                           capability)
+        return validate_output_contract(result, prompt, self.last_raw_text)
 
 
 class DeepSeekProvider(OpenAICompatibleProvider):
@@ -1171,10 +1540,46 @@ class MockProvider(BaseProvider):
 
         fused["visual_signals"] = visual.get("per_frame", [])
         fused["audio_events"] = audio.get("events", [])
+        contract = prompt.meta.get("output_contract") if isinstance(prompt, Prompt) else None
+        if contract == prompts_mod.PURE_AUDIO_OUTPUT_CONTRACT_VERSION:
+            fused["candidates"] = [
+                {
+                    "state_code": "general_vocalization",
+                    "label": prompts_mod.PURE_AUDIO_STATE_LABELS["general_vocalization"],
+                    "confidence": 0.55,
+                    "evidence": [{
+                        "channel": "meow",
+                        "observation": "[mock] 单次清晰发声",
+                        "t": "0.8-1.4s",
+                        "knowledge_basis": "[mock] acoustic pattern",
+                        "signal_confidence": "中",
+                    }],
+                }
+            ]
+            fused["audio_assessment"] = {
+                "contract_version": contract,
+                "arousal": {"value": "moderate", "reason": "[mock] 中等能量发声"},
+                "valence": {"value": "unknown", "reason": "[mock] 纯音频方向性不足"},
+                "confidence": {
+                    "value": 0.55,
+                    "base": 0.45,
+                    "adjustments": [
+                        {"factor": "target_clear", "delta": 0.10},
+                        {"factor": "low_masking", "delta": 0.05},
+                        {"factor": "missing_context", "delta": -0.05},
+                    ],
+                    "reason": "[mock] 目标发声清晰；无重复调用稳定性加分",
+                },
+                "possible_states": ["general_vocalization"],
+                "alternative_explanations": ["contact_or_attention_related"],
+                "limitations": [
+                    "no_visual_context", "no_scene_context", "repeat_stability_unassessed"
+                ],
+            }
         fused["_meta"] = {"provider": self.name, "model": "mock", "capability": capability,
                           "attempts": 1, "species": species,
                           "media_type": media_type, "media_count": len(items)}
-        return fused
+        return validate_output_contract(fused, prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -1486,6 +1891,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mock", action="store_true", help="强制走 mock,不发真实请求")
     args = parser.parse_args(argv)
 
+    # Match the server's local setup; never overwrite an explicit environment.
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(PROJECT_ROOT, ".env"), override=False)
+
     config = load_config(args.config)
     if args.mock:
         config["mock"] = True
@@ -1521,6 +1930,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- base64 探测 ---
     if args.probe:
+        if provider.name == "openai_native":
+            print("[x] 旧 base64 probe 不适用于 OpenAI 输出契约；请使用离线适配器回归测试。")
+            return 2
         if config.get("mock"):
             print("[x] mock 模式下探测没有意义,去掉 --mock 再跑。")
             return 2
@@ -1543,7 +1955,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[x] 视频不存在: {args.video}")
         return 2
 
-    runner = run_native if args.mode == "native" else run_frames
+    if provider.name == "openai_native":
+        try:
+            provider.preflight(args.video, "native")
+        except Exception as exc:
+            print(f"[x] 媒体预检失败: {type(exc).__name__}")
+            return 2
+        if args.mode == "frames":
+            print("OpenAI frames 入口使用已校验的抽帧与音轨联合链路。")
+        runner = run_native
+    else:
+        runner = run_native if args.mode == "native" else run_frames
     result = runner(provider, args.video, args.species, args.context,
                     knowledge, args.max_frames)
     return 1 if "error" in result else 0

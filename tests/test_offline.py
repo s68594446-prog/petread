@@ -103,5 +103,5 @@ def test_background_job_finishes_and_cleans_media_on_every_exit(tmp_path, monkey
 def test_export_is_closed_without_correct_secret(monkeypatch, expected, key, status):
     monkeypatch.setenv('EXPORT_KEY', expected)
     with pytest.raises(HTTPException) as exc:
-        app.export_csv(key=key)
+        app.export_csv(x_export_key=key)
     assert exc.value.status_code == status

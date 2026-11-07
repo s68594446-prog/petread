@@ -15,7 +15,11 @@ import base64
 import io
 import math
 import os
+import time
+from .media_limits import VIDEO_MAX_BYTES, VIDEO_MAX_SECONDS, VIDEO_MAX_FPS, dimensions_ok
 from typing import Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import cv2
 import numpy as np
@@ -72,6 +76,8 @@ def _open(video_path: str) -> "cv2.VideoCapture | None":
     """打开视频,失败返回 None(不抛异常)。"""
     if not video_path or not os.path.isfile(video_path):
         return None
+    if os.path.getsize(video_path) > VIDEO_MAX_BYTES:
+        raise MediaResourceLimitError('视频超过 10 MB，请先裁剪或压缩')
     try:
         cap = cv2.VideoCapture(video_path)
     except Exception:
@@ -82,10 +88,43 @@ def _open(video_path: str) -> "cv2.VideoCapture | None":
         except Exception:
             pass
         return None
+    width, height = cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    fps, count = cap.get(cv2.CAP_PROP_FPS), cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    if (not all(math.isfinite(v) for v in (width, height, fps, count))
+            or not dimensions_ok(width, height) or not 0 < fps <= VIDEO_MAX_FPS
+            or count <= 0 or count / fps > VIDEO_MAX_SECONDS):
+        cap.release()
+        raise MediaResourceLimitError('视频需为 15 秒内、1080p 以内、30fps 以内的有效画面')
     return cap
 
 
+_JOB_CACHE: ContextVar[dict | None] = ContextVar("petread_video_cache", default=None)
+
+
+@contextmanager
+def preprocessing_session():
+    """Reuse decoded motion within one job/thread, never across users or jobs."""
+    token = _JOB_CACHE.set({})
+    try:
+        yield
+    finally:
+        _JOB_CACHE.reset(token)
+
+
 def _motion_curve_raw(video_path: str) -> tuple[np.ndarray, float]:
+    cache = _JOB_CACHE.get()
+    if cache is None or not os.path.isfile(video_path):
+        return _decode_motion_curve(video_path)
+    stat = os.stat(video_path)
+    key = (os.path.realpath(video_path), stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    if key not in cache:
+        curve, fps = _decode_motion_curve(video_path)
+        curve.setflags(write=False)
+        cache[key] = (curve, fps)
+    return cache[key]
+
+
+def _decode_motion_curve(video_path: str) -> tuple[np.ndarray, float]:
     """返回 (曲线, fps)。曲线第 i 项对应第 i 帧与第 i+1 帧之间的差异。
 
     读取失败 / 空视频 / 只有一帧时返回空数组。
@@ -97,12 +136,19 @@ def _motion_curve_raw(video_path: str) -> tuple[np.ndarray, float]:
     fps = _safe_fps(cap)
     diffs: list[float] = []
     prev: np.ndarray | None = None
+    started = time.monotonic()
+    decoded = 0
 
     try:
         while True:
             ok, frame = cap.read()
             if not ok or frame is None:
                 break
+            decoded += 1
+            if (decoded > VIDEO_MAX_SECONDS * VIDEO_MAX_FPS + 1
+                    or time.monotonic() - started > 30
+                    or not dimensions_ok(frame.shape[1], frame.shape[0])):
+                raise MediaResourceLimitError('视频解码超过资源上限，请缩短、降低帧率或分辨率')
             try:
                 small = cv2.resize(frame, DIFF_SIZE, interpolation=cv2.INTER_AREA)
                 gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
@@ -112,6 +158,8 @@ def _motion_curve_raw(video_path: str) -> tuple[np.ndarray, float]:
             if prev is not None:
                 diffs.append(float(np.mean(cv2.absdiff(gray, prev))))
             prev = gray
+    except MediaResourceLimitError:
+        raise
     except Exception:
         # 中途解码崩了也返回已经拿到的部分
         pass
@@ -119,6 +167,10 @@ def _motion_curve_raw(video_path: str) -> tuple[np.ndarray, float]:
         cap.release()
 
     return np.asarray(diffs, dtype=np.float32), fps
+
+
+class MediaResourceLimitError(ValueError):
+    """Resource-bound refusal, never silently converted to partial evidence."""
 
 
 def _curve_time(index: int | np.ndarray, fps: float):

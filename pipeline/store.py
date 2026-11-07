@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS feedback (
 
 CREATE TABLE IF NOT EXISTS profiles (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id         TEXT NOT NULL DEFAULT '',
     pet_name          TEXT NOT NULL,
     species           TEXT NOT NULL,
     calibration_notes TEXT NOT NULL DEFAULT '',
@@ -78,15 +80,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE records ADD COLUMN client_id TEXT NOT NULL DEFAULT ''")
     # 列确保存在后再建索引(新老库都走这里)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_records_client ON records(client_id)")
+    profile_cols = {r["name"] for r in conn.execute("PRAGMA table_info(profiles)")}
+    if "client_id" not in profile_cols:
+        conn.execute("ALTER TABLE profiles ADD COLUMN client_id TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_profiles_client ON profiles(client_id)")
 
 
-def connect(db_path: str | None = None) -> sqlite3.Connection:
+@contextmanager
+def connect(db_path: str | None = None):
     path = db_path or DEFAULT_DB_PATH
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA secure_delete = ON")  # logical deletion also clears SQLite freed cells; not external backups
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db(db_path: str | None = None) -> None:
@@ -131,9 +144,14 @@ def insert_record(
         return int(cur.lastrowid)
 
 
-def get_record(record_id: int, db_path: str | None = None) -> dict | None:
+def get_record(record_id: int, db_path: str | None = None, *,
+               client_id: str | None = None) -> dict | None:
     with connect(db_path) as conn:
-        row = conn.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
+        if client_id is not None:
+            row = conn.execute("SELECT * FROM records WHERE id = ? AND client_id = ?",
+                               (record_id, client_id)).fetchone() if client_id else None
+        else:
+            row = conn.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
     return _row_to_record(row) if row else None
 
 
@@ -225,10 +243,14 @@ def iter_export_rows(db_path: str | None = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def insert_feedback(record_id: int, actual_label: str, user_note: str = "",
-                    db_path: str | None = None) -> int:
+                    db_path: str | None = None, *, client_id: str | None = None) -> int:
     with connect(db_path) as conn:
-        exists = conn.execute("SELECT 1 FROM records WHERE id = ?",
-                              (record_id,)).fetchone()
+        if client_id is not None:
+            exists = conn.execute("SELECT 1 FROM records WHERE id = ? AND client_id = ?",
+                                  (record_id, client_id)).fetchone() if client_id else None
+        else:
+            exists = conn.execute("SELECT 1 FROM records WHERE id = ?",
+                                  (record_id,)).fetchone()
         if not exists:
             raise ValueError(f"record {record_id} 不存在")
         cur = conn.execute(
@@ -253,28 +275,33 @@ def list_feedback(record_id: int, db_path: str | None = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def upsert_profile(pet_name: str, species: str, calibration_notes: str = "",
-                   db_path: str | None = None) -> int:
-    """同名同物种的档案覆盖校准备注,否则新建。"""
+                   db_path: str | None = None, *, client_id: str = "") -> int:
+    """同设备、同名同物种的档案覆盖校准备注,否则新建。"""
+    if not client_id:
+        raise ValueError("client_id 必填")
     with connect(db_path) as conn:
         row = conn.execute(
-            "SELECT id FROM profiles WHERE pet_name = ? AND species = ?",
-            (pet_name, species),
+            "SELECT id FROM profiles WHERE pet_name = ? AND species = ? AND client_id = ?",
+            (pet_name, species, client_id),
         ).fetchone()
         if row:
             conn.execute("UPDATE profiles SET calibration_notes = ? WHERE id = ?",
                          (calibration_notes, row["id"]))
             return int(row["id"])
         cur = conn.execute(
-            """INSERT INTO profiles (pet_name, species, calibration_notes, created_at)
-               VALUES (?,?,?,?)""",
-            (pet_name, species, calibration_notes, _now()),
+            """INSERT INTO profiles (pet_name, species, calibration_notes, created_at, client_id)
+               VALUES (?,?,?,?,?)""",
+            (pet_name, species, calibration_notes, _now(), client_id),
         )
         return int(cur.lastrowid)
 
 
-def list_profiles(db_path: str | None = None) -> list[dict]:
+def list_profiles(db_path: str | None = None, *, client_id: str = "") -> list[dict]:
+    if not client_id:
+        return []
     with connect(db_path) as conn:
-        rows = conn.execute("SELECT * FROM profiles ORDER BY id DESC").fetchall()
+        rows = conn.execute("SELECT * FROM profiles WHERE client_id = ? ORDER BY id DESC",
+                            (client_id,)).fetchall()
     return [dict(r) for r in rows]
 
 

@@ -9,6 +9,8 @@ data/
 *.sqlite3
 .env
 .env.local
+.env.*
+!.env.example
 .git/
 .gitignore
 .gitattributes
@@ -19,3 +21,26 @@ __pycache__/
 .DS_Store
 Thumbs.db
 *.md.bak
+# 离线评估数据与输出不进入线上镜像；本地数据不受影响。
+evaluation/catmeows/runtime/
+evaluation/catmeows/data/
+evaluation/catmeows/dataset/
+evaluation/catmeows/downloads/
+evaluation/catmeows/*.jsonl
+evaluation/catmeows/*.json
+evaluation/catmeows/*.md
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.mov
+*.webm
+*.flac
+*.zip
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+.github/
+ios/
+release/

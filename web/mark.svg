@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="PetRead：相向的狗与猫">
+  <title>PetRead · Together, understood</title>
+  <path fill="#263750" d="M20 73 C13 66 13 53 17 44 C20 33 29 27 40 28 C52 29 59 38 60 49 L60 53 L70 59 C74 62 73 68 69 71 L61 75 C60 88 50 97 37 96 C24 95 17 85 20 73 Z"/>
+  <path fill="#e5937d" d="M72 44 L72 21 L88 32 L103 24 L101 57 C102 73 91 85 78 91 C68 87 61 81 60 73 L72 68 C78 65 79 58 73 53 L68 49 C69 47 70 45 72 44 Z"/>
+  <path fill="#f7f4f0" d="M29 39 C20 39 19 48 20 57 C22 65 28 66 31 60 L34 43 C34 40 32 39 29 39 Z"/>
+  <circle cx="49" cy="48" r="2.6" fill="#f7f4f0"/>
+  <circle cx="86" cy="48" r="2.6" fill="#263750"/>
+</svg>
